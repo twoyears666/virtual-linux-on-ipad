@@ -38,8 +38,8 @@ jobs:
           set -euo pipefail
           grep -q '^Architecture: iphoneos-arm64$' control
           grep -q 'firmware (<< 16.4)' control
-          plutil -lint Info.plist entitlements.plist
-          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' Info.plist)" = "14.0"
+          plutil -lint Resources/Info.plist entitlements.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' Resources/Info.plist)" = "14.0"
           test -x layout/DEBIAN/postinst
 
       - name: 编译并打包 rootless deb
