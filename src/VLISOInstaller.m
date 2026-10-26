@@ -29,7 +29,8 @@ static NSDictionary *VLISOParseRecord(const uint8_t *record) {
 
 	uint8_t nameLength = record[32];
 	char name[256] = {0};
-	if (nameLength > 0 && nameLength < sizeof(name)) {
+	// 名字最长 255 字节，缓冲区留一个字节给结尾的 0。
+	if (nameLength > 0) {
 		memcpy(name, record + 33, nameLength);
 	}
 
