@@ -29,6 +29,12 @@
 - 产物 `if-no-files-found: error` + `retention-days: 30`
 - 诊断日志 `if-no-files-found: warn` + `retention-days: 7`
 
+## 签名与权限
+
+- deb（`main`）：用 `entitlements.plist`，带 `platform-application` 等越狱权限，装进 `/var/jb` 由越狱环境放行。
+- IPA（分支）：改用 `entitlements-ipa.plist`（空字典），**不带任何私有权限**。带了会被 amfid 在进程启动时直接杀掉，表现就是点图标闪退。
+- IPA 只是界面测试包，不越狱也能装（TrollStore 或自签）；真正跑虚拟机仍然必须越狱，因为要加载私有 Hypervisor 运行时。
+
 ## 并发与权限
 
 - `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` + `cancel-in-progress: true`

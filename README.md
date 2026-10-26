@@ -54,7 +54,8 @@ make package FINALPACKAGE=1   # 出 rootless deb
 ## 安装
 
 - deb：Dopamine 越狱后，用 Sileo / Filza 安装，`postinst` 会执行 `uicache` 让图标出现。
-- IPA：TrollStore 直接装，或 AltStore / Sideloadly 用自己的证书重签。
+- IPA：界面测试包，不带任何越狱权限（`entitlements-ipa.plist` 是空字典）。TrollStore 直接装，或 AltStore / Sideloadly 用自己的证书重签；不越狱也能装来看界面。
+- 注意：IPA 只能看界面，真正启动虚拟机仍然必须越狱（要加载私有 Hypervisor 运行时）。
 
 ## 下一步
 

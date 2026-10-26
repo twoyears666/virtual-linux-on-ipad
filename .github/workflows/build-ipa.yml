@@ -35,11 +35,22 @@ jobs:
       - name: 编译 App 并定位产物
         run: |
           set -euo pipefail
-          make package FINALPACKAGE=1
+          # IPA 不带越狱权限：私有 entitlement 会被 amfid 在启动时直接杀掉
+          make package FINALPACKAGE=1 VirtualLinux_CODESIGN_FLAGS="-Sentitlements-ipa.plist"
           app="$(find .theos/_ -maxdepth 6 -type d -name VirtualLinux.app | head -1)"
           test -n "$app"
           echo "APP_PATH=$app" >> "$GITHUB_ENV"
           echo "定位到 $app"
+
+      - name: 校验 IPA 不携带越狱权限
+        run: |
+          set -euo pipefail
+          entitlements="$(codesign -d --entitlements - "$APP_PATH/VirtualLinux" 2>/dev/null || true)"
+          echo "$entitlements"
+          if grep -q 'platform-application' <<<"$entitlements"; then
+            echo "IPA 仍带越狱权限，安装后会闪退" >&2
+            exit 1
+          fi
 
       - name: 打包未签名 IPA
         run: |
