@@ -60,7 +60,7 @@
 	if ([identifier isEqualToString:@"fedora"]) {
 		return [UIColor colorWithRed:0.16 green:0.25 blue:0.45 alpha:1.0];
 	}
-	return UIColor.systemGray;
+	return [UIColor grayColor];
 }
 
 @end
