@@ -96,11 +96,8 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 	cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
 	cell.detailTextLabel.text = machine.summary;
 	cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
-	cell.imageView.image =
-		[UIImage systemImageNamed:[VLDistroIcon symbolNameForIdentifier:machine.distroIdentifier]
-			   withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:24.0
-																			   weight:UIImageSymbolWeightMedium]];
-	cell.imageView.tintColor = [VLDistroIcon colorForIdentifier:machine.distroIdentifier];
+	cell.imageView.image = [VLDistroIcon thumbnailForIdentifier:machine.distroIdentifier size:28.0];
+	cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
 	cell.accessoryType = UITableViewCellAccessoryNone;
 
 	return cell;

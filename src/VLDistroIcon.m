@@ -63,4 +63,41 @@
 	return [UIColor grayColor];
 }
 
++ (UIImage *)imageForIdentifier:(NSString *)identifier {
+	NSString *resolved = identifier.length > 0 ? identifier : @"linux";
+	UIImage *image = [UIImage imageNamed:[NSString stringWithFormat:@"logos/%@.png", resolved]];
+	if (image == nil) {
+		image = [UIImage imageNamed:[NSString stringWithFormat:@"%@.png", resolved]];
+	}
+	if (image == nil) {
+		image = [UIImage systemImageNamed:[self symbolNameForIdentifier:resolved]];
+	}
+	return image;
+}
+
++ (UIImage *)thumbnailForIdentifier:(NSString *)identifier size:(CGFloat)size {
+	UIImage *image = [self imageForIdentifier:identifier];
+	if (image == nil || size <= 0.0) {
+		return image;
+	}
+
+	CGFloat width = image.size.width;
+	CGFloat height = image.size.height;
+	if (width <= 0.0 || height <= 0.0) {
+		return image;
+	}
+
+	CGFloat scale = MIN(size / width, size / height);
+	CGRect target = CGRectMake((size - width * scale) / 2.0,
+							   (size - height * scale) / 2.0,
+							   width * scale,
+							   height * scale);
+
+	UIGraphicsImageRenderer *renderer =
+		[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size)];
+	return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+		[image drawInRect:target];
+	}];
+}
+
 @end

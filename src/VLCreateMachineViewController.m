@@ -111,11 +111,8 @@
 		button.layer.cornerRadius = 14.0;
 		button.layer.borderWidth = 2.0;
 		button.layer.borderColor = UIColor.clearColor.CGColor;
-		button.backgroundColor = [[VLDistroIcon colorForIdentifier:identifier] colorWithAlphaComponent:0.14];
-		button.tintColor = [VLDistroIcon colorForIdentifier:identifier];
-		[button setImage:[UIImage systemImageNamed:[VLDistroIcon symbolNameForIdentifier:identifier]
-															  withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:24.0
-																															  weight:UIImageSymbolWeightSemibold]]
+		button.backgroundColor = [[VLDistroIcon colorForIdentifier:identifier] colorWithAlphaComponent:0.10];
+		[button setImage:[VLDistroIcon thumbnailForIdentifier:identifier size:32.0]
 				forState:UIControlStateNormal];
 		[button.heightAnchor constraintEqualToConstant:52.0].active = YES;
 		[button addTarget:self action:@selector(distroTapped:) forControlEvents:UIControlEventTouchUpInside];

@@ -28,6 +28,8 @@
 
 截图位目前是虚线占位框，等有真实画面再替换。
 
+界面里的发行版图标来自各发行版官方 logo（经 Wikimedia Commons 转成 512px PNG，见 `Resources/logos/`），仅作发行版识别，商标归各自项目所有。
+
 ## 当前状态
 
 - 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译。

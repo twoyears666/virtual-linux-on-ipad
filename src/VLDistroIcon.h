@@ -10,4 +10,10 @@
 + (NSString *)symbolNameForIdentifier:(NSString *)identifier;
 + (UIColor *)colorForIdentifier:(NSString *)identifier;
 
+/// 官方 PNG 图标（Resources/logos/<id>.png）；缺失时退回 SF Symbol。
++ (UIImage *)imageForIdentifier:(NSString *)identifier;
+
+/// 按正方形等比缩放到指定尺寸，供列表与按钮使用。
++ (UIImage *)thumbnailForIdentifier:(NSString *)identifier size:(CGFloat)size;
+
 @end
