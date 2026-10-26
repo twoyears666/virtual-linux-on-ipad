@@ -48,7 +48,13 @@ jobs:
           # 裸 Mach-O 无签名在 iOS 上会被直接 kill，这里显式打 adhoc 签名
           ldid -S "$APP_PATH/VirtualLinux"
           codesign -dv "$APP_PATH/VirtualLinux" 2>&1 | tee /tmp/codesign-info.txt
-          grep -q 'adhoc' /tmp/codesign-info.txt
+          # ldid 只写 CodeDirectory、不带 CMS，macOS codesign 会显示 no signature，
+          # 因此以「存在 CodeDirectory 且没有证书链」判定 adhoc 签名成功
+          grep -q 'CodeDirectory' /tmp/codesign-info.txt
+          if grep -q 'Authority=' /tmp/codesign-info.txt; then
+            echo "签名里意外带了证书链" >&2
+            exit 1
+          fi
 
       - name: 校验 IPA 不携带越狱权限
         run: |
