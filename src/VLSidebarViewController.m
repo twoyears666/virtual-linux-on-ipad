@@ -49,7 +49,7 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 }
 
 - (void)addTapped {
-	VLVMConfiguration *machine = [VLVMStore.sharedStore addMachine];
+	[VLVMStore.sharedStore addMachine];
 	self.machines = [VLVMStore.sharedStore.machines mutableCopy];
 	[self.tableView reloadData];
 
