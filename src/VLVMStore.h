@@ -12,4 +12,7 @@
 /// 追加由新建弹窗组装好的配置并返回它。
 - (VLVMConfiguration *)addMachineWithConfiguration:(VLVMConfiguration *)configuration;
 
+/// 从列表里移除一台虚拟机（只出列，不删除磁盘镜像文件）。
+- (void)removeMachine:(VLVMConfiguration *)configuration;
+
 @end

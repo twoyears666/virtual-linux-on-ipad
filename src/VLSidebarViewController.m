@@ -116,4 +116,82 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 						   didSelectConfiguration:self.machines[(NSUInteger)indexPath.row]];
 }
 
+#pragma mark - 左滑删除
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+	trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+	UIContextualAction *deleteAction =
+		[UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+												title:@"删除"
+											  handler:^(UIContextualAction *action,
+														UIView *sourceView,
+														void (^completionHandler)(BOOL)) {
+		// 先收起侧滑，再弹确认，避免弹窗和滑动动画互相打断。
+		completionHandler(YES);
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self confirmDeleteAtIndex:(NSUInteger)indexPath.row];
+		});
+	}];
+	deleteAction.image = [UIImage systemImageNamed:@"trash"];
+	return [UISwipeActionsConfiguration configurationWithActions:@[ deleteAction ]];
+}
+
+- (void)confirmDeleteAtIndex:(NSUInteger)index {
+	if (index >= self.machines.count) {
+		return;
+	}
+
+	VLVMConfiguration *machine = self.machines[index];
+	UIAlertController *alert =
+		[UIAlertController alertControllerWithTitle:@"删除虚拟机"
+											message:[NSString stringWithFormat:
+													 @"「%@」将从列表移除，磁盘镜像文件仍保留在设备上。",
+													 machine.name]
+									 preferredStyle:UIAlertControllerStyleAlert];
+
+	__weak typeof(self) weakSelf = self;
+	[alert addAction:[UIAlertAction actionWithTitle:@"删除"
+											  style:UIAlertActionStyleDestructive
+											handler:^(UIAlertAction *action) {
+		[weakSelf deleteMachineAtIndex:index];
+	}]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"取消"
+											  style:UIAlertActionStyleCancel
+											handler:nil]];
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)deleteMachineAtIndex:(NSUInteger)index {
+	if (index >= self.machines.count) {
+		return;
+	}
+
+	VLVMConfiguration *machine = self.machines[index];
+	BOOL wasSelected = self.tableView.indexPathForSelectedRow != nil &&
+		self.tableView.indexPathForSelectedRow.row == (NSInteger)index;
+
+	[VLVMStore.sharedStore removeMachine:machine];
+	self.machines = [VLVMStore.sharedStore.machines mutableCopy];
+	[VLStartupLog log:@"列表移除虚拟机：%@", machine.name];
+
+	[self.tableView deleteRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:(NSInteger)index inSection:0] ]
+						  withRowAnimation:UITableViewRowAnimationAutomatic];
+
+	if (self.machines.count == 0) {
+		// 列表空了，右侧回到空状态。
+		[self.selectionDelegate sidebarViewController:self didSelectConfiguration:nil];
+		return;
+	}
+	if (!wasSelected) {
+		return;
+	}
+
+	// 删掉的是当前选中项，自动选中相邻的一台。
+	NSUInteger target = MIN(index, self.machines.count - 1);
+	[self.tableView selectRowAtIndexPath:[NSIndexPath indexPathForRow:(NSInteger)target inSection:0]
+								animated:NO
+						  scrollPosition:UITableViewScrollPositionNone];
+	[self.selectionDelegate sidebarViewController:self didSelectConfiguration:self.machines[target]];
+}
+
 @end

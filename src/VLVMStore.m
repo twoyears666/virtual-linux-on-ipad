@@ -49,4 +49,12 @@
 	return configuration;
 }
 
+- (void)removeMachine:(VLVMConfiguration *)configuration {
+	if (configuration == nil) {
+		return;
+	}
+	// 只从列表移除；磁盘镜像留在沙盒里，避免误删不可恢复的数据。
+	[self.mutableMachines removeObject:configuration];
+}
+
 @end
