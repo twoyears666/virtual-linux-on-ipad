@@ -8,7 +8,6 @@
 	VLVMConfiguration *configuration = [[VLVMConfiguration alloc] init];
 	configuration.name = name;
 	configuration.notes = @"";
-	configuration.bootMode = VLBootModeKernel;
 	configuration.kernelPath = @"";
 	configuration.initrdPath = @"";
 	configuration.cpuCores = 4;
@@ -49,16 +48,6 @@
 			(unsigned long)self.cpuCores,
 			(unsigned long)self.memoryMB,
 			(unsigned long)self.diskGB];
-}
-
-- (NSString *)bootModeString {
-	switch (self.bootMode) {
-		case VLBootModeUEFI:
-			return @"UEFI";
-		case VLBootModeKernel:
-		default:
-			return @"内核直启";
-	}
 }
 
 - (NSString *)resolutionString {

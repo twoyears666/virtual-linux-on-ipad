@@ -1,10 +1,5 @@
 #import <Foundation/Foundation.h>
 
-typedef NS_ENUM(NSInteger, VLBootMode) {
-	VLBootModeKernel = 0,
-	VLBootModeUEFI,
-};
-
 typedef NS_ENUM(NSInteger, VLDisplayResolution) {
 	VLDisplayResolution1024x768 = 0,
 	VLDisplayResolution1280x800,
@@ -35,7 +30,6 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy) NSString *notes;
 
-@property (nonatomic, assign) VLBootMode bootMode;
 @property (nonatomic, copy) NSString *kernelPath;
 @property (nonatomic, copy) NSString *initrdPath;
 
@@ -61,7 +55,6 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 /// 列表行副标题，例如「4 核 · 2048 MB · 32 GB」。
 - (NSString *)summary;
 
-- (NSString *)bootModeString;
 - (NSString *)resolutionString;
 - (NSString *)displayScaleString;
 - (NSString *)networkModeString;

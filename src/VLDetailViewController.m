@@ -107,12 +107,7 @@
 	[VLStartupLog log:@"详情界面 基本信息卡片完成"];
 
 	// 系统
-	UISegmentedControl *bootMode =
-		[self segmentedControlWithTitles:@[ @"内核直启", @"UEFI" ]
-								selected:configuration.bootMode == VLBootModeUEFI ? 1 : 0
-								  action:@selector(bootModeChanged:)];
 	[self.stackView addArrangedSubview:[self cardWithTitle:@"系统" rows:@[
-		[self blockRowWithTitle:@"引导方式" control:bootMode valueLabel:nil],
 		[self rowWithTitle:@"内核" control:[self textFieldWithPlaceholder:@"vmlinuz 路径"
 																	text:configuration.kernelPath
 																  action:@selector(kernelPathChanged:)]],
@@ -440,11 +435,6 @@
 
 - (void)macAddressChanged:(UITextField *)sender {
 	self.configuration.macAddress = sender.text;
-	[self notifyChange];
-}
-
-- (void)bootModeChanged:(UISegmentedControl *)sender {
-	self.configuration.bootMode = sender.selectedSegmentIndex == 1 ? VLBootModeUEFI : VLBootModeKernel;
 	[self notifyChange];
 }
 
