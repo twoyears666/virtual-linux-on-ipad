@@ -1,0 +1,87 @@
+name: Build Rootless DEB
+
+on:
+  push:
+    branches: [main, dev, "feat/**", "fix/**"]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # === 编译打包 —— 产出 iphoneos-arm64 rootless deb ===
+  build:
+    name: 编译打包
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/.theos-src
+    steps:
+      - name: 检出仓库源码
+        uses: actions/checkout@v4
+
+      - name: 安装 ldid 与 dpkg
+        run: brew install ldid dpkg
+
+      - name: 克隆并配置 Theos
+        run: |
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: 校验打包元数据
+        run: |
+          set -euo pipefail
+          grep -q '^Architecture: iphoneos-arm64$' control
+          grep -q 'firmware (<< 16.4)' control
+          plutil -lint Info.plist entitlements.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' Info.plist)" = "14.0"
+          test -x layout/DEBIAN/postinst
+
+      - name: 编译并打包 rootless deb
+        run: make package FINALPACKAGE=1
+
+      - name: 校验 deb 架构与包内路径
+        run: |
+          set -euo pipefail
+          deb="$(ls packages/*.deb | head -1)"
+          echo "产物：$deb"
+          dpkg-deb -f "$deb" Architecture | grep -qx iphoneos-arm64
+          dpkg-deb -f "$deb" Version
+          listing="$(dpkg-deb -c "$deb")"
+          echo "$listing"
+          grep -q 'var/jb/Applications/VirtualLinux.app/VirtualLinux' <<<"$listing"
+          grep -q 'var/jb/Applications/VirtualLinux.app/Info.plist' <<<"$listing"
+
+      - name: 上传 deb 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtualLinux-DEB
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 汇总编译错误（失败时）
+        if: failure()
+        run: |
+          echo "编译或打包失败，检查上方各步骤输出。"
+          if compgen -G "packages/*.deb" > /dev/null; then
+            ls -l packages
+          else
+            echo "未生成任何 deb。"
+          fi
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            .theos/
+            packages/
+          if-no-files-found: warn
+          retention-days: 7

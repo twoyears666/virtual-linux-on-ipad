@@ -1,0 +1,14 @@
+#!/bin/sh
+# 安装后刷新桌面图标，让 rootless App 出现在主屏
+set -e
+
+UICACHE=/var/jb/usr/bin/uicache
+if [ ! -x "$UICACHE" ]; then
+	UICACHE=/usr/bin/uicache
+fi
+
+if [ -x "$UICACHE" ]; then
+	"$UICACHE" -a >/dev/null 2>&1 || true
+fi
+
+exit 0

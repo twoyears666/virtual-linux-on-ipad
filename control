@@ -1,0 +1,14 @@
+Package: com.twoyears666.virtuallinux
+Name: Virtual Linux
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Run Linux virtual machines on jailbroken iPadOS and iOS.
+ Uses the hardware virtualization stack that still exists in the XNU kernel
+ of iPadOS 14.0 up to 16.3.1. Apple removed Hypervisor support in 16.4, so
+ this package refuses to run on newer systems.
+Maintainer: twoyears666
+Author: twoyears666
+Section: Utilities
+Priority: optional
+Depends: firmware (>= 14.0), firmware (<< 16.4)
+Tag: role::enduser
