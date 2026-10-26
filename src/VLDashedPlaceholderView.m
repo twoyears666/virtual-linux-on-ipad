@@ -4,7 +4,7 @@
 
 @property (nonatomic, strong) CAShapeLayer *borderLayer;
 @property (nonatomic, strong) UILabel *textLabel;
-@property (nonatomic, strong) UILabel *hintLabel;
+@property (nonatomic, strong) UIButton *playButton;
 
 @end
 
@@ -37,23 +37,29 @@
 	self.textLabel.textColor = UIColor.secondaryLabelColor;
 	[self addSubview:self.textLabel];
 
-	// 占位区本身也是启动入口，给一行明确的提示。
-	self.hintLabel = [[UILabel alloc] init];
-	self.hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
-	self.hintLabel.text = @"▶ 点按此处直接启动";
-	self.hintLabel.textAlignment = NSTextAlignmentCenter;
-	self.hintLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-	self.hintLabel.textColor = UIColor.systemBlueColor;
-	[self addSubview:self.hintLabel];
+	// 中间的圆形启动按钮：整个占位区也可点，按钮是第一视觉入口。
+	self.playButton = [UIButton buttonWithType:UIButtonTypeCustom];
+	self.playButton.translatesAutoresizingMaskIntoConstraints = NO;
+	self.playButton.backgroundColor = UIColor.systemBlueColor;
+	self.playButton.layer.cornerRadius = 32.0;
+	self.playButton.tintColor = UIColor.whiteColor;
+	UIImageSymbolConfiguration *symbol =
+		[UIImageSymbolConfiguration configurationWithPointSize:28.0 weight:UIImageSymbolWeightSemibold];
+	[self.playButton setImage:[UIImage systemImageNamed:@"play.fill" withConfiguration:symbol]
+					 forState:UIControlStateNormal];
+	[self.playButton addTarget:self action:@selector(handleTap) forControlEvents:UIControlEventTouchUpInside];
+	[self addSubview:self.playButton];
 
 	[NSLayoutConstraint activateConstraints:@[
 		[self.textLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
-		[self.textLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+		[self.textLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor constant:-44.0],
 		[self.textLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:16.0],
 		[self.textLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-16.0],
 
-		[self.hintLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
-		[self.hintLabel.topAnchor constraintEqualToAnchor:self.textLabel.bottomAnchor constant:8.0],
+		[self.playButton.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+		[self.playButton.topAnchor constraintEqualToAnchor:self.textLabel.bottomAnchor constant:16.0],
+		[self.playButton.widthAnchor constraintEqualToConstant:64.0],
+		[self.playButton.heightAnchor constraintEqualToConstant:64.0],
 	]];
 
 	UITapGestureRecognizer *tap =

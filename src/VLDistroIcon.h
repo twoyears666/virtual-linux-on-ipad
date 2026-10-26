@@ -16,4 +16,10 @@
 /// 按正方形等比缩放到指定尺寸，供列表与按钮使用。
 + (UIImage *)thumbnailForIdentifier:(NSString *)identifier size:(CGFloat)size;
 
+/// 蓝色剪影版：只取图标轮廓，由调用方用 tintColor 上色（新建弹窗用）。
++ (UIImage *)templateThumbnailForIdentifier:(NSString *)identifier size:(CGFloat)size;
+
+/// 把任意图片（例如用户导入的自定义图标）等比缩放到指定正方形。
++ (UIImage *)thumbnailForImage:(UIImage *)image size:(CGFloat)size;
+
 @end

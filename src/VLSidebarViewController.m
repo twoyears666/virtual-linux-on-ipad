@@ -96,7 +96,13 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 	cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
 	cell.detailTextLabel.text = machine.summary;
 	cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
-	cell.imageView.image = [VLDistroIcon thumbnailForIdentifier:machine.distroIdentifier size:28.0];
+	// 自定义图标优先，没导入时才用发行版官方图标。
+	UIImage *customIcon = machine.iconPath.length > 0
+		? [UIImage imageWithContentsOfFile:machine.iconPath]
+		: nil;
+	cell.imageView.image = customIcon != nil
+		? [VLDistroIcon thumbnailForImage:customIcon size:28.0]
+		: [VLDistroIcon thumbnailForIdentifier:machine.distroIdentifier size:28.0];
 	cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
 	cell.accessoryType = UITableViewCellAccessoryNone;
 

@@ -126,4 +126,21 @@ static void *VLHypervisorHandle(NSString **outPath) {
 	return [lines componentsJoinedByString:@"\n"];
 }
 
++ (NSUInteger)physicalMemoryMB {
+	return (NSUInteger)(NSProcessInfo.processInfo.physicalMemory / (1024ULL * 1024ULL));
+}
+
++ (NSUInteger)maximumGuestMemoryMB {
+	NSUInteger physical = [self physicalMemoryMB];
+	if (physical < 1024) {
+		return 512;
+	}
+
+	NSUInteger seventyFive = (NSUInteger)((double)physical * 0.75);
+	NSUInteger withSystemReserve = physical - 1024;
+	NSUInteger maximum = MIN(seventyFive, withSystemReserve);
+	maximum -= maximum % 512;
+	return MAX(maximum, 512);
+}
+
 @end

@@ -7,7 +7,31 @@ typedef NS_ENUM(NSInteger, VLDisplayResolution) {
 	VLDisplayResolution1280x800,
 	VLDisplayResolution1440x1080,
 	VLDisplayResolution1920x1200,
+	/// 跟随设备（iPad 原生分辨率，4:3）。
+	VLDisplayResolutionNative,
 };
+
+typedef NS_ENUM(NSInteger, VLFrameRateLimit) {
+	VLFrameRateLimit30 = 0,
+	VLFrameRateLimit60,
+	VLFrameRateLimitUnlimited,
+};
+
+/// 一条端口转发规则。
+@interface VLPortForward : NSObject
+
+@property (nonatomic, assign) NSUInteger hostPort;
+@property (nonatomic, assign) NSUInteger guestPort;
+/// TCP / UDP。
+@property (nonatomic, copy) NSString *protocol;
+
++ (instancetype)forwardWithHostPort:(NSUInteger)hostPort
+						  guestPort:(NSUInteger)guestPort
+						   protocol:(NSString *)protocol;
+
+- (NSString *)displayString;
+
+@end
 
 typedef NS_ENUM(NSInteger, VLDisplayScale) {
 	VLDisplayScaleFit = 0,
@@ -36,6 +60,8 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 @property (nonatomic, copy) NSString *initrdPath;
 /// 安装镜像（ISO）在沙盒里的路径，为空表示未导入。
 @property (nonatomic, copy) NSString *isoPath;
+/// 自定义图标路径；为空时按发行版标识显示官方图标。
+@property (nonatomic, copy) NSString *iconPath;
 /// 发行版标识（alpine / debian / ubuntu / arch / fedora / linux），用于列表图标。
 @property (nonatomic, copy) NSString *distroIdentifier;
 
@@ -47,9 +73,11 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 
 @property (nonatomic, assign) VLDisplayResolution resolution;
 @property (nonatomic, assign) VLDisplayScale displayScale;
+@property (nonatomic, assign) VLFrameRateLimit frameRateLimit;
 
 @property (nonatomic, assign) VLNetworkMode networkMode;
 @property (nonatomic, copy) NSString *macAddress;
+@property (nonatomic, strong) NSMutableArray<VLPortForward *> *portForwards;
 
 @property (nonatomic, assign) VLInputMode inputMode;
 @property (nonatomic, assign) BOOL mouseCapture;
@@ -74,5 +102,6 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 - (NSString *)displayScaleString;
 - (NSString *)networkModeString;
 - (NSString *)inputModeString;
+- (NSString *)frameRateLimitString;
 
 @end

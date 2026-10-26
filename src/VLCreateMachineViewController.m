@@ -5,6 +5,7 @@
 #import <unistd.h>
 
 #import "VLDistroIcon.h"
+#import "VLHostCapabilities.h"
 #import "VLStartupLog.h"
 #import "VLVMConfiguration.h"
 
@@ -25,6 +26,14 @@
 
 @property (nonatomic, strong) NSURL *isoURL;
 @property (nonatomic, strong) UILabel *isoLabel;
+
+/// 用户导入的自定义图标；为空表示用发行版官方图标。
+@property (nonatomic, strong) NSURL *iconURL;
+@property (nonatomic, strong) UIImageView *iconPreviewView;
+@property (nonatomic, strong) UILabel *iconLabel;
+@property (nonatomic, strong) UIButton *customIconButton;
+/// 区分当前弹的是 ISO 选择器还是图标选择器。
+@property (nonatomic, assign) BOOL pickingIcon;
 
 @property (nonatomic, strong) UIView *provisioningOverlay;
 @property (nonatomic, strong) UIProgressView *progressView;
@@ -111,8 +120,10 @@
 		button.layer.cornerRadius = 14.0;
 		button.layer.borderWidth = 2.0;
 		button.layer.borderColor = UIColor.clearColor.CGColor;
-		button.backgroundColor = [[VLDistroIcon colorForIdentifier:identifier] colorWithAlphaComponent:0.10];
-		[button setImage:[VLDistroIcon thumbnailForIdentifier:identifier size:32.0]
+		button.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.10];
+		// 统一蓝色剪影，不显示各发行版自带配色。
+		button.tintColor = UIColor.systemBlueColor;
+		[button setImage:[VLDistroIcon templateThumbnailForIdentifier:identifier size:32.0]
 				forState:UIControlStateNormal];
 		[button.heightAnchor constraintEqualToConstant:52.0].active = YES;
 		[button addTarget:self action:@selector(distroTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -125,11 +136,54 @@
 	self.distroNameLabel.textColor = UIColor.secondaryLabelColor;
 	self.distroNameLabel.textAlignment = NSTextAlignmentCenter;
 
-	UIStackView *column = [[UIStackView alloc] initWithArrangedSubviews:@[ iconRow, self.distroNameLabel ]];
+	self.customIconButton = [self customIconButton];
+
+	UIStackView *column = [[UIStackView alloc] initWithArrangedSubviews:
+		@[ iconRow, self.distroNameLabel, self.customIconButton ]];
 	column.axis = UILayoutConstraintAxisVertical;
-	column.spacing = 8.0;
+	column.spacing = 10.0;
 
 	return [self cardWithTitle:@"发行版图标" rows:@[ column ]];
+}
+
+/// 自定义图标入口：默认显示「导入自定义图标」，导入后显示缩略图与文件名。
+- (UIButton *)customIconButton {
+	self.iconPreviewView = [[UIImageView alloc] init];
+	self.iconPreviewView.contentMode = UIViewContentModeScaleAspectFit;
+	self.iconPreviewView.translatesAutoresizingMaskIntoConstraints = NO;
+
+	self.iconLabel = [[UILabel alloc] init];
+	self.iconLabel.text = @"导入自定义图标（可选）";
+	self.iconLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	self.iconLabel.textColor = UIColor.systemBlueColor;
+	self.iconLabel.numberOfLines = 1;
+
+	UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+	button.layer.cornerRadius = 12.0;
+	button.layer.borderWidth = 1.0;
+	button.layer.borderColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.25].CGColor;
+	button.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.08];
+	[button.heightAnchor constraintEqualToConstant:44.0].active = YES;
+	[button addTarget:self action:@selector(importIconTapped) forControlEvents:UIControlEventTouchUpInside];
+
+	UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[ self.iconPreviewView, self.iconLabel ]];
+	content.axis = UILayoutConstraintAxisHorizontal;
+	content.spacing = 8.0;
+	content.alignment = UIStackViewAlignmentCenter;
+	content.userInteractionEnabled = NO;
+	content.translatesAutoresizingMaskIntoConstraints = NO;
+	[button addSubview:content];
+
+	[NSLayoutConstraint activateConstraints:@[
+		[content.centerXAnchor constraintEqualToAnchor:button.centerXAnchor],
+		[content.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
+		[content.leadingAnchor constraintGreaterThanOrEqualToAnchor:button.leadingAnchor constant:12.0],
+		[content.trailingAnchor constraintLessThanOrEqualToAnchor:button.trailingAnchor constant:-12.0],
+		[self.iconPreviewView.widthAnchor constraintEqualToConstant:24.0],
+		[self.iconPreviewView.heightAnchor constraintEqualToConstant:24.0],
+	]];
+
+	return button;
 }
 
 - (UIView *)basicInfoCard {
@@ -149,12 +203,27 @@
 	self.cpuValueLabel = [self valueLabelWithText:@"4 核"];
 	self.cpuSlider = [self sliderWithMin:1.0 max:8.0 value:4.0 action:@selector(cpuSliderChanged:)];
 
-	self.memoryValueLabel = [self valueLabelWithText:@"2048 MB"];
-	self.memorySlider = [self sliderWithMin:512.0 max:8192.0 value:2048.0 action:@selector(memorySliderChanged:)];
+	// 内存上限：本机 75% 与「本机内存 - 1 GB」取小，按 512 MB 对齐。
+	NSUInteger maximumMemoryMB = MAX((NSUInteger)512, [VLHostCapabilities maximumGuestMemoryMB]);
+	NSUInteger defaultMemoryMB = MIN((NSUInteger)2048, maximumMemoryMB);
+	self.memoryValueLabel =
+		[self valueLabelWithText:[NSString stringWithFormat:@"%lu MB", (unsigned long)defaultMemoryMB]];
+	self.memorySlider = [self sliderWithMin:512.0
+										max:(CGFloat)maximumMemoryMB
+									  value:(CGFloat)defaultMemoryMB
+									 action:@selector(memorySliderChanged:)];
+
+	UILabel *note = [[UILabel alloc] init];
+	note.text = [NSString stringWithFormat:@"按 0.5 GB 递增，最大 %lu MB（本机 %lu MB 的 75%%，并至少给系统留 1 GB）",
+				 (unsigned long)maximumMemoryMB, (unsigned long)[VLHostCapabilities physicalMemoryMB]];
+	note.numberOfLines = 0;
+	note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	note.textColor = UIColor.secondaryLabelColor;
 
 	return [self cardWithTitle:@"硬件" rows:@[
 		[self blockRowWithTitle:@"CPU 核心数" slider:self.cpuSlider valueLabel:self.cpuValueLabel],
 		[self blockRowWithTitle:@"内存" slider:self.memorySlider valueLabel:self.memoryValueLabel],
+		note,
 	]];
 }
 
@@ -205,6 +274,10 @@
 		return;
 	}
 	self.selectedDistro = identifiers[(NSUInteger)index];
+	// 选了发行版图标就清除自定义图标，两者只有一个生效。
+	self.iconURL = nil;
+	self.iconPreviewView.image = nil;
+	self.iconLabel.text = @"导入自定义图标（可选）";
 	[self updateDistroSelection];
 }
 
@@ -214,12 +287,18 @@
 
 	for (NSUInteger index = 0; index < self.distroButtons.count; index++) {
 		UIButton *button = self.distroButtons[index];
-		BOOL selected = index == selectedIndex;
-		button.layer.borderColor = selected ? [VLDistroIcon colorForIdentifier:identifiers[index]].CGColor
-										   : UIColor.clearColor.CGColor;
+		BOOL selected = index == selectedIndex && self.iconURL == nil;
+		button.layer.borderColor = selected ? UIColor.systemBlueColor.CGColor : UIColor.clearColor.CGColor;
 	}
-	self.distroNameLabel.text =
-		[NSString stringWithFormat:@"已选：%@", [VLDistroIcon displayNameForIdentifier:self.selectedDistro]];
+
+	self.customIconButton.layer.borderColor =
+		self.iconURL != nil ? UIColor.systemBlueColor.CGColor
+							: [UIColor.systemBlueColor colorWithAlphaComponent:0.25].CGColor;
+
+	NSString *distroName = [VLDistroIcon displayNameForIdentifier:self.selectedDistro];
+	self.distroNameLabel.text = self.iconURL != nil
+		? [NSString stringWithFormat:@"已选：%@ · 自定义图标", distroName]
+		: [NSString stringWithFormat:@"已选：%@", distroName];
 }
 
 - (void)nameFieldChanged:(UITextField *)sender {
@@ -263,6 +342,16 @@
 		[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
 	picker.delegate = self;
 	picker.allowsMultipleSelection = NO;
+	self.pickingIcon = NO;
+	[self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)importIconTapped {
+	UIDocumentPickerViewController *picker =
+		[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeImage ] asCopy:YES];
+	picker.delegate = self;
+	picker.allowsMultipleSelection = NO;
+	self.pickingIcon = YES;
 	[self presentViewController:picker animated:YES completion:nil];
 }
 
@@ -272,6 +361,21 @@
 	if (url == nil) {
 		return;
 	}
+
+	if (self.pickingIcon) {
+		UIImage *image = [UIImage imageWithContentsOfFile:url.path];
+		if (image == nil) {
+			[VLStartupLog log:@"自定义图标读取失败：%@", url.lastPathComponent];
+			return;
+		}
+		self.iconURL = url;
+		self.iconPreviewView.image = [VLDistroIcon thumbnailForImage:image size:24.0];
+		self.iconLabel.text = url.lastPathComponent;
+		[VLStartupLog log:@"已选择自定义图标：%@", url.lastPathComponent];
+		[self updateDistroSelection];
+		return;
+	}
+
 	self.isoURL = url;
 	self.isoLabel.text = url.lastPathComponent;
 	self.isoLabel.textColor = UIColor.labelColor;
@@ -341,6 +445,17 @@
 								attributes:nil
 									 error:error]) {
 		return NO;
+	}
+
+	[self reportProgress:0.20 status:@"拷贝自定义图标…"];
+	if (self.iconURL != nil) {
+		NSString *extension = self.iconURL.pathExtension.length > 0 ? self.iconURL.pathExtension : @"png";
+		NSURL *iconDestination =
+			[machineDirectory URLByAppendingPathComponent:[@"icon" stringByAppendingPathExtension:extension]];
+		if (![fileManager copyItemAtURL:self.iconURL toURL:iconDestination error:error]) {
+			return NO;
+		}
+		configuration.iconPath = iconDestination.path;
 	}
 
 	[self reportProgress:0.30 status:@"拷贝 ISO 安装镜像…"];

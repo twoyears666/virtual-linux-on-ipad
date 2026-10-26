@@ -76,7 +76,18 @@
 }
 
 + (UIImage *)thumbnailForIdentifier:(NSString *)identifier size:(CGFloat)size {
-	UIImage *image = [self imageForIdentifier:identifier];
+	return [self thumbnailForImage:[self imageForIdentifier:identifier] size:size];
+}
+
++ (UIImage *)templateThumbnailForIdentifier:(NSString *)identifier size:(CGFloat)size {
+	UIImage *thumbnail = [self thumbnailForIdentifier:identifier size:size];
+	if (thumbnail == nil) {
+		return nil;
+	}
+	return [thumbnail imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
++ (UIImage *)thumbnailForImage:(UIImage *)image size:(CGFloat)size {
 	if (image == nil || size <= 0.0) {
 		return image;
 	}

@@ -19,4 +19,10 @@
 /// 给人看的诊断信息，用于界面展示。
 + (NSString *)diagnosticReport;
 
+/// 本机物理内存（MB）。
++ (NSUInteger)physicalMemoryMB;
+
+/// 客机内存上限：本机 75% 与「本机内存 - 1 GB」取小，按 512 MB 取整。
++ (NSUInteger)maximumGuestMemoryMB;
+
 @end

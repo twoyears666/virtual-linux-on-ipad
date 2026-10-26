@@ -1,5 +1,28 @@
 #import "VLVMConfiguration.h"
 
+#import <UIKit/UIKit.h>
+
+@implementation VLPortForward
+
++ (instancetype)forwardWithHostPort:(NSUInteger)hostPort
+						  guestPort:(NSUInteger)guestPort
+						   protocol:(NSString *)protocol {
+	VLPortForward *forward = [[VLPortForward alloc] init];
+	forward.hostPort = hostPort;
+	forward.guestPort = guestPort;
+	forward.protocol = protocol.length > 0 ? protocol : @"TCP";
+	return forward;
+}
+
+- (NSString *)displayString {
+	return [NSString stringWithFormat:@"%@ %lu → %lu",
+			self.protocol,
+			(unsigned long)self.hostPort,
+			(unsigned long)self.guestPort];
+}
+
+@end
+
 @implementation VLVMConfiguration
 
 + (instancetype)sampleConfigurationWithName:(NSString *)name
@@ -11,12 +34,15 @@
 	configuration.kernelPath = @"";
 	configuration.initrdPath = @"";
 	configuration.isoPath = @"";
+	configuration.iconPath = @"";
 	configuration.distroIdentifier = @"linux";
 	configuration.cpuCores = 4;
 	configuration.memoryMB = memoryMB;
 	configuration.disks = [NSMutableArray arrayWithObject:[VLDiskImage diskWithName:@"磁盘 1" sizeGB:diskGB]];
 	configuration.diskImageReady = NO;
-	configuration.resolution = VLDisplayResolution1024x768;
+	configuration.resolution = VLDisplayResolutionNative;
+	configuration.frameRateLimit = VLFrameRateLimit60;
+	configuration.portForwards = [NSMutableArray array];
 	configuration.displayScale = VLDisplayScaleFit;
 	configuration.networkMode = VLNetworkModeShared;
 	configuration.macAddress = @"52:54:00:12:34:56";
@@ -32,11 +58,14 @@
 		_name = @"新建虚拟机";
 		_notes = @"";
 		_isoPath = @"";
+		_iconPath = @"";
 		_distroIdentifier = @"linux";
 		_cpuCores = 4;
 		_memoryMB = 2048;
 		_disks = [NSMutableArray arrayWithObject:[VLDiskImage diskWithName:@"磁盘 1" sizeGB:16]];
-		_resolution = VLDisplayResolution1024x768;
+		_portForwards = [NSMutableArray array];
+		_resolution = VLDisplayResolutionNative;
+		_frameRateLimit = VLFrameRateLimit60;
 		_displayScale = VLDisplayScaleFit;
 		_networkMode = VLNetworkModeShared;
 		_macAddress = @"52:54:00:12:34:56";
@@ -87,6 +116,14 @@
 
 - (NSString *)resolutionString {
 	switch (self.resolution) {
+		case VLDisplayResolutionNative: {
+			CGSize native = UIScreen.mainScreen.nativeBounds.size;
+			CGFloat width = MAX(native.width, native.height);
+			CGFloat height = MIN(native.width, native.height);
+			return [NSString stringWithFormat:@"%lu × %lu（本机）",
+					(unsigned long)lround(width),
+					(unsigned long)lround(height)];
+		}
 		case VLDisplayResolution1280x800:
 			return @"1280 × 800";
 		case VLDisplayResolution1440x1080:
@@ -130,6 +167,18 @@
 		case VLInputModeDirectTouch:
 		default:
 			return @"直接触控";
+	}
+}
+
+- (NSString *)frameRateLimitString {
+	switch (self.frameRateLimit) {
+		case VLFrameRateLimit30:
+			return @"30 fps";
+		case VLFrameRateLimitUnlimited:
+			return @"不限制";
+		case VLFrameRateLimit60:
+		default:
+			return @"60 fps";
 	}
 }
 

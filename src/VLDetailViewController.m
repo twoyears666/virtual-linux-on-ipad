@@ -93,7 +93,8 @@
 	placeholder.onTap = ^{
 		[weakSelf startTapped];
 	};
-	[placeholder.heightAnchor constraintEqualToConstant:220.0].active = YES;
+	// 4:3（iPad 常见比例），宽度撑满、高度按比例算。
+	[placeholder.heightAnchor constraintEqualToAnchor:placeholder.widthAnchor multiplier:0.75].active = YES;
 	[self.stackView addArrangedSubview:placeholder];
 	[VLStartupLog log:@"详情界面 截图占位完成"];
 
@@ -127,17 +128,21 @@
 	]]];
 	[VLStartupLog log:@"详情界面 系统卡片完成"];
 
-	// 硬件
+	// 硬件：内存上限跟随本机物理内存（75%，至少给系统留 1 GB）
 	self.cpuValueLabel = [self valueLabelWithText:[NSString stringWithFormat:@"%lu 核", (unsigned long)configuration.cpuCores]];
 	UISlider *cpuSlider = [self sliderWithMin:1.0
 										  max:8.0
 										value:(CGFloat)configuration.cpuCores
 									   action:@selector(cpuSliderChanged:)];
 
+	NSUInteger maximumMemoryMB = [VLHostCapabilities maximumGuestMemoryMB];
+	if (configuration.memoryMB > maximumMemoryMB) {
+		configuration.memoryMB = maximumMemoryMB;
+	}
 	self.memoryValueLabel =
 		[self valueLabelWithText:[NSString stringWithFormat:@"%lu MB", (unsigned long)configuration.memoryMB]];
 	UISlider *memorySlider = [self sliderWithMin:512.0
-											 max:8192.0
+											 max:(CGFloat)maximumMemoryMB
 										   value:(CGFloat)configuration.memoryMB
 										  action:@selector(memorySliderChanged:)];
 
@@ -155,14 +160,19 @@
 		diskIndex++;
 	}
 
-	UIButton *addDiskButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	[addDiskButton setTitle:@"＋ 添加磁盘" forState:UIControlStateNormal];
-	addDiskButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-	[addDiskButton addTarget:self action:@selector(addDiskTapped) forControlEvents:UIControlEventTouchUpInside];
-	[storageRows addObject:addDiskButton];
+	// 镜像已创建后磁盘布局固定：不能再拖动容量，也不能再加/删磁盘。
+	if (!configuration.diskImageReady) {
+		UIButton *addDiskButton = [UIButton buttonWithType:UIButtonTypeSystem];
+		[addDiskButton setTitle:@"＋ 添加磁盘" forState:UIControlStateNormal];
+		addDiskButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+		[addDiskButton addTarget:self action:@selector(addDiskTapped) forControlEvents:UIControlEventTouchUpInside];
+		[storageRows addObject:addDiskButton];
+	}
 
 	UILabel *diskNote = [[UILabel alloc] init];
-	diskNote.text = @"每块盘是独立镜像，首次启动前容量随意改；镜像创建后改容量会新建镜像，原数据不保留";
+	diskNote.text = configuration.diskImageReady
+		? @"磁盘镜像已创建，容量与数量均已锁定"
+		: @"每块盘是独立镜像，创建镜像前容量随意改；镜像创建后锁定";
 	diskNote.numberOfLines = 0;
 	diskNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	diskNote.textColor = UIColor.secondaryLabelColor;
@@ -179,9 +189,15 @@
 								selected:(NSInteger)configuration.displayScale
 								  action:@selector(displayScaleChanged:)];
 
+	UISegmentedControl *frameRate =
+		[self segmentedControlWithTitles:@[ @"30 fps", @"60 fps", @"不限制" ]
+								selected:(NSInteger)configuration.frameRateLimit
+								  action:@selector(frameRateLimitChanged:)];
+
 	[self.stackView addArrangedSubview:[self cardWithTitle:@"显示" rows:@[
 		[self rowWithTitle:@"分辨率" control:self.resolutionButton],
 		[self blockRowWithTitle:@"缩放" control:scale valueLabel:nil],
+		[self rowWithTitle:@"帧率上限" control:frameRate],
 		[self rowWithTitle:@"显示设备" control:[self valueLabelWithText:@"virtio-gpu"]],
 	]]];
 	[VLStartupLog log:@"详情界面 显示卡片完成"];
@@ -191,13 +207,31 @@
 		[self segmentedControlWithTitles:@[ @"共享", @"桥接", @"无" ]
 								selected:(NSInteger)configuration.networkMode
 								  action:@selector(networkModeChanged:)];
-	[self.stackView addArrangedSubview:[self cardWithTitle:@"网络" rows:@[
-		[self blockRowWithTitle:@"网络模式" control:network valueLabel:nil],
-		[self rowWithTitle:@"MAC 地址" control:[self textFieldWithPlaceholder:@"52:54:00:12:34:56"
-																	   text:configuration.macAddress
-																	 action:@selector(macAddressChanged:)]],
-		[self rowWithTitle:@"端口转发" control:[self valueLabelWithText:@"尚未添加"]],
-	]]];
+	NSMutableArray<UIView *> *networkRows = [NSMutableArray array];
+	[networkRows addObject:[self blockRowWithTitle:@"网络模式" control:network valueLabel:nil]];
+	[networkRows addObject:[self rowWithTitle:@"MAC 地址"
+									  control:[self textFieldWithPlaceholder:@"52:54:00:12:34:56"
+																		text:configuration.macAddress
+																	  action:@selector(macAddressChanged:)]]];
+
+	if (configuration.portForwards.count == 0) {
+		[networkRows addObject:[self rowWithTitle:@"端口转发" control:[self valueLabelWithText:@"尚未添加"]]];
+	}
+	NSUInteger forwardIndex = 0;
+	for (VLPortForward *forward in configuration.portForwards) {
+		[networkRows addObject:[self portForwardRow:forward index:forwardIndex]];
+		forwardIndex++;
+	}
+
+	UIButton *addForwardButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[addForwardButton setTitle:@"＋ 添加端口转发" forState:UIControlStateNormal];
+	addForwardButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	[addForwardButton addTarget:self
+						 action:@selector(addPortForwardTapped)
+			   forControlEvents:UIControlEventTouchUpInside];
+	[networkRows addObject:addForwardButton];
+
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"网络" rows:networkRows]];
 	[VLStartupLog log:@"详情界面 网络卡片完成"];
 
 	// 输入
@@ -396,6 +430,7 @@
 	__weak typeof(self) weakSelf = self;
 
 	NSArray<NSNumber *> *values = @[
+		@(VLDisplayResolutionNative),
 		@(VLDisplayResolution1024x768),
 		@(VLDisplayResolution1280x800),
 		@(VLDisplayResolution1440x1080),
@@ -512,6 +547,113 @@
 	[self notifyChange];
 }
 
+- (void)frameRateLimitChanged:(UISegmentedControl *)sender {
+	self.configuration.frameRateLimit = (VLFrameRateLimit)sender.selectedSegmentIndex;
+	[self notifyChange];
+}
+
+- (UIView *)portForwardRow:(VLPortForward *)forward index:(NSUInteger)index {
+	UILabel *valueLabel = [self valueLabelWithText:forward.displayString];
+
+	UIButton *removeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[removeButton setTitle:@"移除" forState:UIControlStateNormal];
+	removeButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+	[removeButton setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
+	removeButton.tag = (NSInteger)index;
+	[removeButton addTarget:self
+					 action:@selector(removePortForwardTapped:)
+		   forControlEvents:UIControlEventTouchUpInside];
+
+	UIStackView *control = [[UIStackView alloc] initWithArrangedSubviews:@[ valueLabel, removeButton ]];
+	control.axis = UILayoutConstraintAxisHorizontal;
+	control.spacing = 8.0;
+	control.alignment = UIStackViewAlignmentCenter;
+	return [self rowWithTitle:@"端口转发" control:control];
+}
+
+- (void)addPortForwardTapped {
+	UIAlertController *alert =
+		[UIAlertController alertControllerWithTitle:@"添加端口转发"
+											message:@"把 iPad 上的端口转发到客户机端口"
+									 preferredStyle:UIAlertControllerStyleAlert];
+
+	[alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+		field.placeholder = @"主机端口（如 8080）";
+		field.keyboardType = UIKeyboardTypeNumberPad;
+	}];
+	[alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+		field.placeholder = @"客户机端口（如 80）";
+		field.keyboardType = UIKeyboardTypeNumberPad;
+	}];
+
+	__weak typeof(self) weakSelf = self;
+	void (^commit)(NSString *protocol) = ^(NSString *protocol) {
+		[weakSelf commitPortForwardFromAlert:alert protocol:protocol];
+	};
+
+	[alert addAction:[UIAlertAction actionWithTitle:@"添加 TCP"
+											  style:UIAlertActionStyleDefault
+											handler:^(UIAlertAction *action) {
+		commit(@"TCP");
+	}]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"添加 UDP"
+											  style:UIAlertActionStyleDefault
+											handler:^(UIAlertAction *action) {
+		commit(@"UDP");
+	}]];
+	[alert addAction:[UIAlertAction actionWithTitle:@"取消"
+											  style:UIAlertActionStyleCancel
+											handler:nil]];
+
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)commitPortForwardFromAlert:(UIAlertController *)alert protocol:(NSString *)protocol {
+	NSArray<UITextField *> *fields = alert.textFields;
+	NSInteger hostPort = fields.count > 0 ? fields[0].text.integerValue : 0;
+	NSInteger guestPort = fields.count > 1 ? fields[1].text.integerValue : 0;
+
+	if (hostPort <= 0 || hostPort > 65535 || guestPort <= 0 || guestPort > 65535) {
+		UIAlertController *error =
+			[UIAlertController alertControllerWithTitle:@"端口无效"
+												message:@"端口必须是 1 – 65535 之间的整数。"
+										 preferredStyle:UIAlertControllerStyleAlert];
+		[error addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+		[self presentViewController:error animated:YES completion:nil];
+		return;
+	}
+
+	VLPortForward *forward = [VLPortForward forwardWithHostPort:(NSUInteger)hostPort
+													  guestPort:(NSUInteger)guestPort
+													   protocol:protocol];
+	[self.configuration.portForwards addObject:forward];
+	[VLStartupLog log:@"项目添加端口转发：%@", forward.displayString];
+	[self reloadKeepingScrollPosition];
+	[self notifyChange];
+}
+
+- (void)removePortForwardTapped:(UIButton *)sender {
+	NSInteger index = sender.tag;
+	if (index < 0 || index >= (NSInteger)self.configuration.portForwards.count) {
+		return;
+	}
+	VLPortForward *forward = self.configuration.portForwards[(NSUInteger)index];
+	[self.configuration.portForwards removeObjectAtIndex:(NSUInteger)index];
+	[VLStartupLog log:@"项目移除端口转发：%@", forward.displayString];
+	[self reloadKeepingScrollPosition];
+	[self notifyChange];
+}
+
+/// 重建后把滚动位置还原，免得点一下按钮就跳回顶部。
+- (void)reloadKeepingScrollPosition {
+	CGPoint offset = self.scrollView.contentOffset;
+	[self rebuildContent];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		CGFloat maximum = MAX(0.0, self.scrollView.contentSize.height - self.scrollView.bounds.size.height);
+		self.scrollView.contentOffset = CGPointMake(0.0, MIN(offset.y, maximum));
+	});
+}
+
 - (void)addDiskTapped {
 	// 新盘默认 8 GB，容量可在下面那条滑块上改。
 	[self.configuration addDiskWithSizeGB:8];
@@ -541,10 +683,15 @@
 									 value:(CGFloat)disk.sizeGB
 									action:@selector(diskSliderChanged:)];
 	slider.tag = (NSInteger)index;
+	if (self.configuration.diskImageReady) {
+		// 镜像已落地，容量不可再改，避免出现「界面 32 GB、文件还是 16 GB」。
+		slider.userInteractionEnabled = NO;
+		slider.alpha = 0.4;
+	}
 
 	UIView *block = [self blockRowWithTitle:disk.name control:slider valueLabel:valueLabel];
-	if (index == 0) {
-		// 第一块是系统盘，不允许删除。
+	if (index == 0 || self.configuration.diskImageReady) {
+		// 第一块是系统盘；镜像创建后也不再允许删盘。
 		return block;
 	}
 
