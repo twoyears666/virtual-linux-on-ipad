@@ -1,18 +1,14 @@
 #import "VLAppDelegate.h"
 
-#import "VLViewController.h"
+#import "VLRootSplitViewController.h"
 
 @implementation VLAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
 
-	VLViewController *rootViewController = [[VLViewController alloc] initWithNibName:nil bundle:nil];
-	UINavigationController *navigationController =
-		[[UINavigationController alloc] initWithRootViewController:rootViewController];
-	navigationController.navigationBar.prefersLargeTitles = YES;
-
-	self.window.rootViewController = navigationController;
+	VLRootSplitViewController *rootViewController = [[VLRootSplitViewController alloc] init];
+	self.window.rootViewController = rootViewController;
 	[self.window makeKeyAndVisible];
 
 	return YES;

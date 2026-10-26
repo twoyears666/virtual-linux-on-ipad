@@ -15,10 +15,21 @@
 | 包架构 | `iphoneos-arm64` |
 | 设备 | 支持 Hypervisor 的设备，例如 M1/M2 iPad、iPhone 14 Pro |
 
+## 界面
+
+参考 UTM 的双栏布局，但设置不再走弹窗，直接在右侧面板改：
+
+- 左栏：虚拟机列表，显示名称、`核数 · 内存 · 磁盘`、引导方式
+- 右栏：截图占位（虚线框，运行后换成客户机画面）+ 内联设置
+- 设置分组：基本信息、系统、硬件、存储、显示、网络、输入、运行环境
+- 改任何一项立即写回内存里的配置，并同步左栏概要
+
+截图位目前是虚线占位框，等有真实画面再替换。
+
 ## 当前状态
 
-- 已完成：Theos 工程、UIKit 界面、rootless deb 打包、GitHub Actions 自动编译（每次推送产出 deb artifact）。
-- 待接入：虚拟化后端。`src/VLLinuxVirtualMachine.m` 目前只做能力校验，点「启动」会明确报出缺什么；界面会实时显示设备型号、系统版本、越狱环境、Hypervisor 是否存在。
+- 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译。
+- 待接入：虚拟化后端。`src/VLLinuxVirtualMachine.m` 目前只做能力校验，点「启动」会明确报出缺什么；「运行环境」卡片会显示设备型号、系统版本、越狱环境、Hypervisor 是否存在。
 - 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地生成后放进 `VirtualLinux.app/Frameworks/`。
 
 ## 构建
@@ -26,29 +37,24 @@
 本地具备 Theos 时：
 
 ```sh
-make package FINALPACKAGE=1
+make package FINALPACKAGE=1   # 出 rootless deb
 ```
-
-产物在 `packages/`。
 
 ## CI
 
-`.github/workflows/build-rootless-deb.yml`：
+分支和产物的对应关系见 [rules.md](rules.md)，摘要：
 
-1. 检出源码，装 `ldid` 与 `dpkg`
-2. 克隆 Theos 并配置 `$THEOS`
-3. 校验 `control` 架构、系统上限、`Info.plist` 最低版本
-4. `make package FINALPACKAGE=1` 打包 rootless deb
-5. 用 `dpkg-deb` 校验架构为 `iphoneos-arm64`、App 落在 `/var/jb/Applications/VirtualLinux.app`
-6. 上传 `VirtualLinux-DEB` artifact（保留 30 天）
+| 分支 | 产物 |
+| --- | --- |
+| `main` | `VirtualLinux-DEB`（rootless deb） |
+| `dev` / `feat/**` / `fix/**` | `VirtualLinux-IPA`（未签名，供 TrollStore / AltStore 重签） |
 
-失败时会额外上传 `build-log`。
+两个 workflow 都会校验产物结构：deb 查 `iphoneos-arm64` 与 `/var/jb/Applications/VirtualLinux.app`，IPA 查 `Payload/VirtualLinux.app` 与 `MinimumOSVersion`。
 
 ## 安装
 
-1. 用 Dopamine 越狱（系统必须是 14.0 – 16.3.1）
-2. 下载 CI 的 `VirtualLinux-DEB` artifact
-3. Sileo / Filza 安装 deb，`postinst` 会执行 `uicache` 让图标出现
+- deb：Dopamine 越狱后，用 Sileo / Filza 安装，`postinst` 会执行 `uicache` 让图标出现。
+- IPA：TrollStore 直接装，或 AltStore / Sideloadly 用自己的证书重签。
 
 ## 下一步
 

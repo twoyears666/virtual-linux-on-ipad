@@ -1,0 +1,84 @@
+name: Build IPA
+
+# 只在分支出未签名 IPA（界面测试用）；main 只出 deb，见 build-rootless-deb.yml
+on:
+  push:
+    branches: [dev, "feat/**", "fix/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # === 编译打包 —— 分支产出未签名 IPA，供 TrollStore / AltStore 重签安装 ===
+  build:
+    name: 编译打包
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/.theos-src
+    steps:
+      - name: 检出仓库源码
+        uses: actions/checkout@v4
+
+      - name: 安装 ldid 与 dpkg
+        run: brew install ldid dpkg
+
+      - name: 克隆并配置 Theos
+        run: |
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: 编译 App 并定位产物
+        run: |
+          set -euo pipefail
+          make package FINALPACKAGE=1
+          app="$(find .theos/_ -maxdepth 6 -type d -name VirtualLinux.app | head -1)"
+          test -n "$app"
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+          echo "定位到 $app"
+
+      - name: 打包未签名 IPA
+        run: |
+          set -euo pipefail
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -qry VirtualLinux.ipa Payload
+          unzip -l VirtualLinux.ipa
+
+      - name: 校验 IPA 包内结构
+        run: |
+          set -euo pipefail
+          unzip -p build/VirtualLinux.ipa Payload/VirtualLinux.app/Info.plist > /tmp/ipa-Info.plist
+          plutil -lint /tmp/ipa-Info.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' /tmp/ipa-Info.plist)" = "VirtualLinux"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' /tmp/ipa-Info.plist)" = "14.0"
+          unzip -l build/VirtualLinux.ipa | grep -q 'Payload/VirtualLinux.app/VirtualLinux'
+
+      - name: 上传 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: VirtualLinux-IPA
+          path: build/VirtualLinux.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 汇总编译错误（失败时）
+        if: failure()
+        run: |
+          echo "IPA 编译失败，检查上方各步骤输出。"
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            .theos/
+            build/
+          if-no-files-found: warn
+          retention-days: 7

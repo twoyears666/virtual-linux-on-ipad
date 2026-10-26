@@ -1,10 +1,9 @@
 name: Build Rootless DEB
 
+# 只在 main 出 deb；分支出 IPA 见 build-ipa.yml
 on:
   push:
-    branches: [main, dev, "feat/**", "fix/**"]
-  pull_request:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

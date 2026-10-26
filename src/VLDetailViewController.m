@@ -1,0 +1,509 @@
+#import "VLDetailViewController.h"
+
+#import <math.h>
+
+#import "VLDashedPlaceholderView.h"
+#import "VLHostCapabilities.h"
+#import "VLLinuxVirtualMachine.h"
+
+@interface VLDetailViewController ()
+
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIStackView *stackView;
+
+@property (nonatomic, strong) UITextField *nameField;
+@property (nonatomic, strong) UILabel *cpuValueLabel;
+@property (nonatomic, strong) UILabel *memoryValueLabel;
+@property (nonatomic, strong) UILabel *diskValueLabel;
+@property (nonatomic, strong) UIButton *resolutionButton;
+@property (nonatomic, strong) UILabel *statusLabel;
+
+@end
+
+@implementation VLDetailViewController
+
+- (void)viewDidLoad {
+	[super viewDidLoad];
+
+	self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+
+	self.scrollView = [[UIScrollView alloc] init];
+	self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+	self.scrollView.alwaysBounceVertical = YES;
+	self.scrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+	[self.view addSubview:self.scrollView];
+
+	self.stackView = [[UIStackView alloc] init];
+	self.stackView.translatesAutoresizingMaskIntoConstraints = NO;
+	self.stackView.axis = UILayoutConstraintAxisVertical;
+	self.stackView.spacing = 16.0;
+	[self.scrollView addSubview:self.stackView];
+
+	[NSLayoutConstraint activateConstraints:@[
+		[self.scrollView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+		[self.scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+		[self.scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+		[self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+		[self.stackView.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant:16.0],
+		[self.stackView.leadingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.leadingAnchor constant:16.0],
+		[self.stackView.trailingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.trailingAnchor constant:-16.0],
+		[self.stackView.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-24.0],
+	]];
+
+	[self rebuildContent];
+}
+
+- (void)setConfiguration:(VLVMConfiguration *)configuration {
+	_configuration = configuration;
+	self.title = configuration != nil ? configuration.name : @"虚拟机";
+
+	if (self.isViewLoaded) {
+		[self rebuildContent];
+	}
+}
+
+- (void)rebuildContent {
+	for (UIView *view in self.stackView.arrangedSubviews) {
+		[self.stackView removeArrangedSubview:view];
+		[view removeFromSuperview];
+	}
+
+	if (self.configuration == nil) {
+		UILabel *emptyLabel = [[UILabel alloc] init];
+		emptyLabel.text = @"在左侧选择一台虚拟机。";
+		emptyLabel.textColor = UIColor.secondaryLabelColor;
+		emptyLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+		[self.stackView addArrangedSubview:emptyLabel];
+		return;
+	}
+
+	VLVMConfiguration *configuration = self.configuration;
+
+	// 截图占位：不是必须的图，先画虚线框标注清楚位置。
+	VLDashedPlaceholderView *placeholder = [[VLDashedPlaceholderView alloc] init];
+	placeholder.translatesAutoresizingMaskIntoConstraints = NO;
+	placeholder.text = [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
+	[placeholder.heightAnchor constraintEqualToConstant:220.0].active = YES;
+	[self.stackView addArrangedSubview:placeholder];
+
+	// 基本信息
+	self.nameField = [self textFieldWithPlaceholder:@"虚拟机名称"
+											  text:configuration.name
+											action:@selector(nameChanged:)];
+	self.nameField.textColor = UIColor.labelColor;
+	self.nameField.textAlignment = NSTextAlignmentRight;
+
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"基本信息" rows:@[
+		[self rowWithTitle:@"名称" control:self.nameField],
+		[self rowWithTitle:@"备注" control:[self textFieldWithPlaceholder:@"可选"
+																	  text:configuration.notes
+																	action:@selector(notesChanged:)]],
+	]]];
+
+	// 系统
+	UISegmentedControl *bootMode =
+		[self segmentedControlWithTitles:@[ @"内核直启", @"UEFI" ]
+								selected:configuration.bootMode == VLBootModeUEFI ? 1 : 0
+								  action:@selector(bootModeChanged:)];
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"系统" rows:@[
+		[self blockRowWithTitle:@"引导方式" control:bootMode valueLabel:nil],
+		[self rowWithTitle:@"内核" control:[self textFieldWithPlaceholder:@"vmlinuz 路径"
+																	text:configuration.kernelPath
+																  action:@selector(kernelPathChanged:)]],
+		[self rowWithTitle:@"初始内存盘" control:[self textFieldWithPlaceholder:@"可选"
+																		  text:configuration.initrdPath
+																		action:@selector(initrdPathChanged:)]],
+		[self rowWithTitle:@"客户机架构" control:[self valueLabelWithText:@"arm64"]],
+	]]];
+
+	// 硬件
+	self.cpuValueLabel = [self valueLabelWithText:[NSString stringWithFormat:@"%lu 核", (unsigned long)configuration.cpuCores]];
+	UISlider *cpuSlider = [self sliderWithMin:1.0
+										  max:8.0
+										value:(CGFloat)configuration.cpuCores
+									   action:@selector(cpuSliderChanged:)];
+
+	self.memoryValueLabel =
+		[self valueLabelWithText:[NSString stringWithFormat:@"%lu MB", (unsigned long)configuration.memoryMB]];
+	UISlider *memorySlider = [self sliderWithMin:512.0
+											 max:8192.0
+										   value:(CGFloat)configuration.memoryMB
+										  action:@selector(memorySliderChanged:)];
+
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"硬件" rows:@[
+		[self blockRowWithTitle:@"CPU 核心数" control:cpuSlider valueLabel:self.cpuValueLabel],
+		[self blockRowWithTitle:@"内存" control:memorySlider valueLabel:self.memoryValueLabel],
+	]]];
+
+	// 存储
+	self.diskValueLabel =
+		[self valueLabelWithText:[NSString stringWithFormat:@"%lu GB", (unsigned long)configuration.diskGB]];
+	UISlider *diskSlider = [self sliderWithMin:4.0
+										  max:64.0
+										value:(CGFloat)configuration.diskGB
+									   action:@selector(diskSliderChanged:)];
+
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"存储" rows:@[
+		[self blockRowWithTitle:@"磁盘容量" control:diskSlider valueLabel:self.diskValueLabel],
+		[self rowWithTitle:@"磁盘镜像" control:[self valueLabelWithText:@"新建空白镜像"]],
+		[self rowWithTitle:@"只读" control:[self switchWithOn:configuration.diskReadOnly
+													  action:@selector(diskReadOnlyChanged:)]],
+	]]];
+
+	// 显示
+	self.resolutionButton = [self resolutionButtonWithConfiguration:configuration];
+
+	UISegmentedControl *scale =
+		[self segmentedControlWithTitles:@[ @"适应", @"填充", @"原始" ]
+								selected:(NSInteger)configuration.displayScale
+								  action:@selector(displayScaleChanged:)];
+
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"显示" rows:@[
+		[self rowWithTitle:@"分辨率" control:self.resolutionButton],
+		[self blockRowWithTitle:@"缩放" control:scale valueLabel:nil],
+		[self rowWithTitle:@"显示设备" control:[self valueLabelWithText:@"virtio-gpu"]],
+	]]];
+
+	// 网络
+	UISegmentedControl *network =
+		[self segmentedControlWithTitles:@[ @"共享", @"桥接", @"无" ]
+								selected:(NSInteger)configuration.networkMode
+								  action:@selector(networkModeChanged:)];
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"网络" rows:@[
+		[self blockRowWithTitle:@"网络模式" control:network valueLabel:nil],
+		[self rowWithTitle:@"MAC 地址" control:[self textFieldWithPlaceholder:@"52:54:00:12:34:56"
+																	   text:configuration.macAddress
+																	 action:@selector(macAddressChanged:)]],
+		[self rowWithTitle:@"端口转发" control:[self valueLabelWithText:@"尚未添加"]],
+	]]];
+
+	// 输入
+	UISegmentedControl *input =
+		[self segmentedControlWithTitles:@[ @"直接触控", @"指针" ]
+								selected:(NSInteger)configuration.inputMode
+								  action:@selector(inputModeChanged:)];
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"输入" rows:@[
+		[self blockRowWithTitle:@"触控模式" control:input valueLabel:nil],
+		[self rowWithTitle:@"捕获鼠标" control:[self switchWithOn:configuration.mouseCapture
+													   action:@selector(mouseCaptureChanged:)]],
+		[self rowWithTitle:@"捕获外接键盘" control:[self switchWithOn:configuration.keyboardCapture
+															 action:@selector(keyboardCaptureChanged:)]],
+	]]];
+
+	// 运行环境：Hypervisor 是否可用直接摆在这里，省得再去翻日志。
+	UILabel *environmentLabel = [[UILabel alloc] init];
+	environmentLabel.numberOfLines = 0;
+	environmentLabel.font = [UIFont monospacedSystemFontOfSize:12.0 weight:UIFontWeightRegular];
+	environmentLabel.textColor = UIColor.secondaryLabelColor;
+	environmentLabel.text = [VLHostCapabilities diagnosticReport];
+
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"运行环境" rows:@[ environmentLabel ]]];
+
+	// 启动
+	UIButton *startButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	startButton.translatesAutoresizingMaskIntoConstraints = NO;
+	[startButton setTitle:@"启动虚拟机" forState:UIControlStateNormal];
+	startButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+	[startButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+	startButton.backgroundColor = self.view.tintColor;
+	startButton.layer.cornerRadius = 12.0;
+	[startButton addTarget:self action:@selector(startTapped) forControlEvents:UIControlEventTouchUpInside];
+	[startButton.heightAnchor constraintEqualToConstant:50.0].active = YES;
+	[self.stackView addArrangedSubview:startButton];
+
+	self.statusLabel = [[UILabel alloc] init];
+	self.statusLabel.numberOfLines = 0;
+	self.statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	self.statusLabel.textColor = UIColor.secondaryLabelColor;
+	self.statusLabel.text = @"阶段：界面已就绪，虚拟化后端待接入";
+	[self.stackView addArrangedSubview:self.statusLabel];
+}
+
+#pragma mark - 控件构造
+
+- (UILabel *)sectionTitleLabel:(NSString *)text {
+	UILabel *label = [[UILabel alloc] init];
+	label.text = text;
+	label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+	label.textColor = UIColor.labelColor;
+	return label;
+}
+
+- (UILabel *)valueLabelWithText:(NSString *)text {
+	UILabel *label = [[UILabel alloc] init];
+	label.text = text;
+	label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+	label.textColor = UIColor.secondaryLabelColor;
+	label.textAlignment = NSTextAlignmentRight;
+	return label;
+}
+
+- (UIView *)cardWithTitle:(NSString *)title rows:(NSArray<UIView *> *)rows {
+	UIView *card = [[UIView alloc] init];
+	card.translatesAutoresizingMaskIntoConstraints = NO;
+	card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+	card.layer.cornerRadius = 14.0;
+
+	UIStackView *inner = [[UIStackView alloc] init];
+	inner.translatesAutoresizingMaskIntoConstraints = NO;
+	inner.axis = UILayoutConstraintAxisVertical;
+	inner.spacing = 12.0;
+	[inner addArrangedSubview:[self sectionTitleLabel:title]];
+	for (UIView *row in rows) {
+		[inner addArrangedSubview:row];
+	}
+	[card addSubview:inner];
+
+	[NSLayoutConstraint activateConstraints:@[
+		[inner.topAnchor constraintEqualToAnchor:card.topAnchor constant:16.0],
+		[inner.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16.0],
+		[inner.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16.0],
+		[inner.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16.0],
+	]];
+
+	return card;
+}
+
+- (UIView *)rowWithTitle:(NSString *)title control:(UIView *)control {
+	UIStackView *row = [[UIStackView alloc] init];
+	row.axis = UILayoutConstraintAxisHorizontal;
+	row.alignment = UIStackViewAlignmentCenter;
+	row.spacing = 12.0;
+
+	UILabel *label = [[UILabel alloc] init];
+	label.text = title;
+	label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	label.textColor = UIColor.labelColor;
+	[label setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+
+	[control setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+	[control setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+	[row addArrangedSubview:label];
+	[row addArrangedSubview:control];
+	return row;
+}
+
+- (UIView *)blockRowWithTitle:(NSString *)title control:(UIView *)control valueLabel:(UILabel *)valueLabel {
+	UIStackView *column = [[UIStackView alloc] init];
+	column.axis = UILayoutConstraintAxisVertical;
+	column.spacing = 8.0;
+
+	UIStackView *headerRow = [[UIStackView alloc] init];
+	headerRow.axis = UILayoutConstraintAxisHorizontal;
+	headerRow.alignment = UIStackViewAlignmentCenter;
+	headerRow.spacing = 8.0;
+
+	UILabel *label = [[UILabel alloc] init];
+	label.text = title;
+	label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	label.textColor = UIColor.labelColor;
+	[headerRow addArrangedSubview:label];
+
+	UIView *spacer = [[UIView alloc] init];
+	[spacer setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+	[headerRow addArrangedSubview:spacer];
+
+	if (valueLabel != nil) {
+		[headerRow addArrangedSubview:valueLabel];
+	}
+
+	[column addArrangedSubview:headerRow];
+	[column addArrangedSubview:control];
+	return column;
+}
+
+- (UITextField *)textFieldWithPlaceholder:(NSString *)placeholder text:(NSString *)text action:(SEL)action {
+	UITextField *field = [[UITextField alloc] init];
+	field.placeholder = placeholder;
+	field.text = text;
+	field.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	field.textColor = UIColor.secondaryLabelColor;
+	field.textAlignment = NSTextAlignmentRight;
+	field.borderStyle = UITextBorderStyleNone;
+	field.clearButtonMode = UITextFieldViewModeWhileEditing;
+	field.returnKeyType = UIReturnKeyDone;
+	field.autocorrectionType = UITextAutocorrectionTypeNo;
+	field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+	[field addTarget:self action:action forControlEvents:UIControlEventEditingChanged];
+	return field;
+}
+
+- (UISwitch *)switchWithOn:(BOOL)on action:(SEL)action {
+	UISwitch *toggle = [[UISwitch alloc] init];
+	toggle.on = on;
+	[toggle addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+	return toggle;
+}
+
+- (UISlider *)sliderWithMin:(CGFloat)min max:(CGFloat)max value:(CGFloat)value action:(SEL)action {
+	UISlider *slider = [[UISlider alloc] init];
+	slider.minimumValue = (float)min;
+	slider.maximumValue = (float)max;
+	slider.value = (float)value;
+	[slider addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+	return slider;
+}
+
+- (UISegmentedControl *)segmentedControlWithTitles:(NSArray<NSString *> *)titles
+										  selected:(NSInteger)selected
+											action:(SEL)action {
+	UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:titles];
+	if (selected >= 0 && selected < (NSInteger)titles.count) {
+		control.selectedSegmentIndex = selected;
+	}
+	[control addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+	return control;
+}
+
+- (UIButton *)resolutionButtonWithConfiguration:(VLVMConfiguration *)configuration {
+	UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+	[button setTitle:configuration.resolutionString forState:UIControlStateNormal];
+	button.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	button.showsMenuAsPrimaryAction = YES;
+	button.menu = [self resolutionMenu];
+	return button;
+}
+
+- (UIMenu *)resolutionMenu {
+	__weak typeof(self) weakSelf = self;
+
+	NSArray<NSNumber *> *values = @[
+		@(VLDisplayResolution1024x768),
+		@(VLDisplayResolution1280x800),
+		@(VLDisplayResolution1440x1080),
+		@(VLDisplayResolution1920x1200),
+	];
+
+	NSMutableArray<UIAction *> *actions = [NSMutableArray array];
+	for (NSNumber *value in values) {
+		VLVMConfiguration *probe = [[VLVMConfiguration alloc] init];
+		probe.resolution = (VLDisplayResolution)value.integerValue;
+		NSString *title = probe.resolutionString;
+
+		UIAction *action = [UIAction actionWithTitle:title
+											   image:nil
+										  identifier:nil
+											 handler:^(UIAction *selectedAction) {
+			weakSelf.configuration.resolution = (VLDisplayResolution)value.integerValue;
+			[weakSelf.resolutionButton setTitle:title forState:UIControlStateNormal];
+			[weakSelf notifyChange];
+		}];
+		action.state = weakSelf.configuration.resolution == value.integerValue ? UIMenuElementStateOn : UIMenuElementStateOff;
+		[actions addObject:action];
+	}
+
+	return [UIMenu menuWithTitle:@"分辨率" children:actions];
+}
+
+#pragma mark - 设置变更
+
+- (void)notifyChange {
+	[self.changeDelegate detailViewControllerDidChangeConfiguration:self];
+}
+
+- (void)nameChanged:(UITextField *)sender {
+	self.configuration.name = sender.text;
+	self.title = sender.text;
+	[self notifyChange];
+}
+
+- (void)notesChanged:(UITextField *)sender {
+	self.configuration.notes = sender.text;
+	[self notifyChange];
+}
+
+- (void)kernelPathChanged:(UITextField *)sender {
+	self.configuration.kernelPath = sender.text;
+	[self notifyChange];
+}
+
+- (void)initrdPathChanged:(UITextField *)sender {
+	self.configuration.initrdPath = sender.text;
+	[self notifyChange];
+}
+
+- (void)macAddressChanged:(UITextField *)sender {
+	self.configuration.macAddress = sender.text;
+	[self notifyChange];
+}
+
+- (void)bootModeChanged:(UISegmentedControl *)sender {
+	self.configuration.bootMode = sender.selectedSegmentIndex == 1 ? VLBootModeUEFI : VLBootModeKernel;
+	[self notifyChange];
+}
+
+- (void)displayScaleChanged:(UISegmentedControl *)sender {
+	self.configuration.displayScale = (VLDisplayScale)sender.selectedSegmentIndex;
+	[self notifyChange];
+}
+
+- (void)networkModeChanged:(UISegmentedControl *)sender {
+	self.configuration.networkMode = (VLNetworkMode)sender.selectedSegmentIndex;
+	[self notifyChange];
+}
+
+- (void)inputModeChanged:(UISegmentedControl *)sender {
+	self.configuration.inputMode = (VLInputMode)sender.selectedSegmentIndex;
+	[self notifyChange];
+}
+
+- (void)diskReadOnlyChanged:(UISwitch *)sender {
+	self.configuration.diskReadOnly = sender.isOn;
+	[self notifyChange];
+}
+
+- (void)mouseCaptureChanged:(UISwitch *)sender {
+	self.configuration.mouseCapture = sender.isOn;
+	[self notifyChange];
+}
+
+- (void)keyboardCaptureChanged:(UISwitch *)sender {
+	self.configuration.keyboardCapture = sender.isOn;
+	[self notifyChange];
+}
+
+- (void)cpuSliderChanged:(UISlider *)sender {
+	NSUInteger cores = (NSUInteger)MAX(1.0, roundf(sender.value));
+	sender.value = (float)cores;
+	self.configuration.cpuCores = cores;
+	self.cpuValueLabel.text = [NSString stringWithFormat:@"%lu 核", (unsigned long)cores];
+	[self notifyChange];
+}
+
+- (void)memorySliderChanged:(UISlider *)sender {
+	NSUInteger megabytes = (NSUInteger)(MAX(512.0, roundf(sender.value / 512.0)) * 512.0);
+	sender.value = (float)megabytes;
+	self.configuration.memoryMB = megabytes;
+	self.memoryValueLabel.text = [NSString stringWithFormat:@"%lu MB", (unsigned long)megabytes];
+	[self notifyChange];
+}
+
+- (void)diskSliderChanged:(UISlider *)sender {
+	NSUInteger gigabytes = (NSUInteger)(MAX(4.0, roundf(sender.value / 4.0)) * 4.0);
+	sender.value = (float)gigabytes;
+	self.configuration.diskGB = gigabytes;
+	self.diskValueLabel.text = [NSString stringWithFormat:@"%lu GB", (unsigned long)gigabytes];
+	[self notifyChange];
+}
+
+#pragma mark - 启动
+
+- (void)startTapped {
+	VLLinuxVirtualMachine *machine = [[VLLinuxVirtualMachine alloc] init];
+	machine.kernelPath = self.configuration.kernelPath;
+	machine.initrdPath = self.configuration.initrdPath;
+	machine.memorySizeInMegabytes = self.configuration.memoryMB;
+
+	NSError *error = nil;
+	if ([machine startWithError:&error]) {
+		self.statusLabel.text = @"阶段：客户机启动中";
+		return;
+	}
+
+	self.statusLabel.text = [NSString stringWithFormat:@"启动被拒绝（错误码 %ld）：%@",
+							 (long)error.code, error.localizedDescription];
+}
+
+@end
