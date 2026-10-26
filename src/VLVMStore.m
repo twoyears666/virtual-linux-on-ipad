@@ -42,14 +42,9 @@
 	return [self.mutableMachines copy];
 }
 
-- (VLVMConfiguration *)addMachine {
-	VLVMConfiguration *machine =
-		[VLVMConfiguration sampleConfigurationWithName:[NSString stringWithFormat:@"虚拟机 %lu",
-														(unsigned long)self.mutableMachines.count + 1]
-											  memoryMB:2048
-												diskGB:16];
-	[self.mutableMachines addObject:machine];
-	return machine;
+- (VLVMConfiguration *)addMachineWithConfiguration:(VLVMConfiguration *)configuration {
+	[self.mutableMachines addObject:configuration];
+	return configuration;
 }
 
 @end

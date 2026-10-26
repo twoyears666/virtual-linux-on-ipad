@@ -9,7 +9,7 @@
 
 + (instancetype)sharedStore;
 
-/// 追加一台示例配置并返回它。
-- (VLVMConfiguration *)addMachine;
+/// 追加由新建弹窗组装好的配置并返回它。
+- (VLVMConfiguration *)addMachineWithConfiguration:(VLVMConfiguration *)configuration;
 
 @end

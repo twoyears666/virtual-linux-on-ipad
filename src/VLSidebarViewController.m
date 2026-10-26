@@ -1,5 +1,6 @@
 #import "VLSidebarViewController.h"
 
+#import "VLCreateMachineViewController.h"
 #import "VLStartupLog.h"
 #import "VLVMStore.h"
 
@@ -52,14 +53,28 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 }
 
 - (void)addTapped {
-	[VLVMStore.sharedStore addMachine];
-	self.machines = [VLVMStore.sharedStore.machines mutableCopy];
-	[self.tableView reloadData];
+	NSString *suggestedName =
+		[NSString stringWithFormat:@"虚拟机 %lu",
+			(unsigned long)VLVMStore.sharedStore.machines.count + 1];
+	VLCreateMachineViewController *creator =
+		[[VLCreateMachineViewController alloc] initWithSuggestedName:suggestedName];
 
-	NSUInteger index = self.machines.count - 1;
-	[self selectConfigurationAtIndex:index];
-	[self.selectionDelegate sidebarViewController:self
-						   didSelectConfiguration:self.machines[index]];
+	__weak typeof(self) weakSelf = self;
+	creator.completion = ^(VLVMConfiguration *configuration) {
+		[VLVMStore.sharedStore addMachineWithConfiguration:configuration];
+		weakSelf.machines = [VLVMStore.sharedStore.machines mutableCopy];
+		[weakSelf.tableView reloadData];
+
+		NSUInteger index = weakSelf.machines.count - 1;
+		[weakSelf selectConfigurationAtIndex:index];
+		[weakSelf.selectionDelegate sidebarViewController:weakSelf
+								   didSelectConfiguration:weakSelf.machines[index]];
+	};
+
+	UINavigationController *navigationController =
+		[[UINavigationController alloc] initWithRootViewController:creator];
+	navigationController.modalPresentationStyle = UIModalPresentationFormSheet;
+	[self presentViewController:navigationController animated:YES completion:nil];
 }
 
 #pragma mark - UITableViewDataSource

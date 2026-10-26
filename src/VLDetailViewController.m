@@ -138,7 +138,7 @@
 	]]];
 	[VLStartupLog log:@"详情界面 硬件卡片完成"];
 
-	// 存储
+	// 存储：容量随时可改，下次启动时按当前值创建/扩容磁盘镜像
 	self.diskValueLabel =
 		[self valueLabelWithText:[NSString stringWithFormat:@"%lu GB", (unsigned long)configuration.diskGB]];
 	UISlider *diskSlider = [self sliderWithMin:4.0
@@ -146,11 +146,18 @@
 										value:(CGFloat)configuration.diskGB
 									   action:@selector(diskSliderChanged:)];
 
+	UILabel *diskNote = [[UILabel alloc] init];
+	diskNote.text = @"容量随时可调，下次启动时按该值创建或扩容磁盘镜像";
+	diskNote.numberOfLines = 0;
+	diskNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	diskNote.textColor = UIColor.secondaryLabelColor;
+
 	[self.stackView addArrangedSubview:[self cardWithTitle:@"存储" rows:@[
 		[self blockRowWithTitle:@"磁盘容量" control:diskSlider valueLabel:self.diskValueLabel],
 		[self rowWithTitle:@"磁盘镜像" control:[self valueLabelWithText:@"新建空白镜像"]],
 		[self rowWithTitle:@"只读" control:[self switchWithOn:configuration.diskReadOnly
 													  action:@selector(diskReadOnlyChanged:)]],
+		diskNote,
 	]]];
 	[VLStartupLog log:@"详情界面 存储卡片完成"];
 
