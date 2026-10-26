@@ -136,7 +136,7 @@
 	self.distroNameLabel.textColor = UIColor.secondaryLabelColor;
 	self.distroNameLabel.textAlignment = NSTextAlignmentCenter;
 
-	self.customIconButton = [self customIconButton];
+	self.customIconButton = [self buildCustomIconButton];
 
 	UIStackView *column = [[UIStackView alloc] initWithArrangedSubviews:
 		@[ iconRow, self.distroNameLabel, self.customIconButton ]];
@@ -147,7 +147,7 @@
 }
 
 /// 自定义图标入口：默认显示「导入自定义图标」，导入后显示缩略图与文件名。
-- (UIButton *)customIconButton {
+- (UIButton *)buildCustomIconButton {
 	self.iconPreviewView = [[UIImageView alloc] init];
 	self.iconPreviewView.contentMode = UIViewContentModeScaleAspectFit;
 	self.iconPreviewView.translatesAutoresizingMaskIntoConstraints = NO;
