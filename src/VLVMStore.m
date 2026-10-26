@@ -1,5 +1,7 @@
 #import "VLVMStore.h"
 
+#import "VLStartupLog.h"
+
 @interface VLVMStore ()
 
 @property (nonatomic, strong) NSMutableArray<VLVMConfiguration *> *mutableMachines;
@@ -49,12 +51,33 @@
 	return configuration;
 }
 
-- (void)removeMachine:(VLVMConfiguration *)configuration {
+- (BOOL)removeMachine:(VLVMConfiguration *)configuration {
 	if (configuration == nil) {
-		return;
+		return NO;
 	}
-	// 只从列表移除；磁盘镜像留在沙盒里，避免误删不可恢复的数据。
+
+	// 真删磁盘文件：整目录带走 ISO、图标和所有稀疏镜像。
+	NSString *rootPath = configuration.rootPath;
+	if (rootPath.length == 0 && configuration.isoPath.length > 0) {
+		// 旧数据没有记录 rootPath，从 install.iso 反推 <位置>/<UUID> 这层。
+		NSURL *isoDirectory = [NSURL fileURLWithPath:configuration.isoPath].URLByDeletingLastPathComponent;
+		if ([isoDirectory.URLByDeletingLastPathComponent.lastPathComponent isEqualToString:@"VirtualMachines"]) {
+			rootPath = isoDirectory.path;
+		}
+	}
+
+	NSFileManager *fileManager = NSFileManager.defaultManager;
+	if (rootPath.length > 0 && [fileManager fileExistsAtPath:rootPath]) {
+		NSError *error = nil;
+		if (![fileManager removeItemAtPath:rootPath error:&error]) {
+			[VLStartupLog log:@"删除虚拟机目录失败：%@（%@）", rootPath, error.localizedDescription];
+			return NO;
+		}
+		[VLStartupLog log:@"已删除虚拟机目录：%@", rootPath];
+	}
+
 	[self.mutableMachines removeObject:configuration];
+	return YES;
 }
 
 @end

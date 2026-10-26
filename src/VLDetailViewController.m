@@ -84,17 +84,31 @@
 	}
 
 	VLVMConfiguration *configuration = self.configuration;
+	// 存放目录不在了（外接盘拔出、目录被删）就冻结：不给启动，其余设置仍可查看。
+	BOOL frozen = !configuration.isStorageAvailable;
+
+	if (frozen) {
+		[self.stackView addArrangedSubview:[self frozenBannerView]];
+	}
 
 	// 截图占位：不是必须的图，先画虚线框标注清楚位置；点按即启动。
 	VLDashedPlaceholderView *placeholder = [[VLDashedPlaceholderView alloc] init];
 	placeholder.translatesAutoresizingMaskIntoConstraints = NO;
-	placeholder.text = [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
+	placeholder.text = frozen
+		? @"已冻结\n存放位置不可用，恢复目录后自动解冻"
+		: [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
 	__weak typeof(self) weakSelf = self;
-	placeholder.onTap = ^{
-		[weakSelf startTapped];
-	};
+	if (!frozen) {
+		placeholder.onTap = ^{
+			[weakSelf startTapped];
+		};
+	}
 	// 4:3（iPad 常见比例），宽度撑满、高度按比例算。
 	[placeholder.heightAnchor constraintEqualToAnchor:placeholder.widthAnchor multiplier:0.75].active = YES;
+	if (frozen) {
+		placeholder.alpha = 0.55;
+		placeholder.userInteractionEnabled = NO;
+	}
 	[self.stackView addArrangedSubview:placeholder];
 	[VLStartupLog log:@"详情界面 截图占位完成"];
 
@@ -709,9 +723,40 @@
 	return column;
 }
 
+#pragma mark - 冻结提示
+
+- (UIView *)frozenBannerView {
+	UILabel *label = [[UILabel alloc] init];
+	label.translatesAutoresizingMaskIntoConstraints = NO;
+	label.numberOfLines = 0;
+	label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	label.textColor = UIColor.labelColor;
+	label.text = @"已冻结：这台虚拟机的存放目录不在了（外接盘拔出或目录被删）。"
+				  @"把目录恢复回来，它会自动解冻。";
+
+	UIView *banner = [[UIView alloc] init];
+	banner.backgroundColor = [UIColor.systemOrangeColor colorWithAlphaComponent:0.15];
+	banner.layer.cornerRadius = 12.0;
+	[banner addSubview:label];
+
+	[NSLayoutConstraint activateConstraints:@[
+		[label.leadingAnchor constraintEqualToAnchor:banner.leadingAnchor constant:12.0],
+		[label.trailingAnchor constraintEqualToAnchor:banner.trailingAnchor constant:-12.0],
+		[label.topAnchor constraintEqualToAnchor:banner.topAnchor constant:10.0],
+		[label.bottomAnchor constraintEqualToAnchor:banner.bottomAnchor constant:-10.0],
+	]];
+
+	return banner;
+}
+
 #pragma mark - 启动
 
 - (void)startTapped {
+	if (!self.configuration.isStorageAvailable) {
+		self.statusLabel.text = @"存储不可用：虚拟机已冻结，恢复存放目录后才能启动";
+		return;
+	}
+
 	VLLinuxVirtualMachine *machine = [[VLLinuxVirtualMachine alloc] init];
 	machine.kernelPath = self.configuration.kernelPath;
 	machine.initrdPath = self.configuration.initrdPath;

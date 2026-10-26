@@ -2,6 +2,8 @@
 
 #import <UIKit/UIKit.h>
 
+#import "VLLog.h"
+
 #import <limits.h>
 #import <signal.h>
 #import <stdarg.h>
@@ -109,6 +111,8 @@ static void VLStartupLogHandleSignal(int signalNumber) {
 	va_end(arguments);
 
 	VLStartupLogAppend(@"startup.log", line);
+	// 同一行也进统一日志，导出时能在一份文件里看到完整时间线。
+	[VLLog writeLine:line];
 }
 
 @end

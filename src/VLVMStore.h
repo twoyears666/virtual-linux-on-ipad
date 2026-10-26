@@ -12,7 +12,8 @@
 /// 追加由新建弹窗组装好的配置并返回它。
 - (VLVMConfiguration *)addMachineWithConfiguration:(VLVMConfiguration *)configuration;
 
-/// 从列表里移除一台虚拟机（只出列，不删除磁盘镜像文件）。
-- (void)removeMachine:(VLVMConfiguration *)configuration;
+/// 删除虚拟机：整目录（ISO、图标、所有磁盘镜像）一并删除。
+/// 返回 NO 表示文件删不掉，此时虚拟机仍保留在列表里。
+- (BOOL)removeMachine:(VLVMConfiguration *)configuration;
 
 @end

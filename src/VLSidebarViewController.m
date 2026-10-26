@@ -2,7 +2,9 @@
 
 #import "VLCreateMachineViewController.h"
 #import "VLDistroIcon.h"
+#import "VLSettingsViewController.h"
 #import "VLStartupLog.h"
+#import "VLStorageManager.h"
 #import "VLVMStore.h"
 
 static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
@@ -34,7 +36,35 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 		[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
 													  target:self
 													  action:@selector(addTapped)];
-	self.navigationItem.rightBarButtonItem = addItem;
+	UIBarButtonItem *settingsItem =
+		[[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"gearshape"]
+										 style:UIBarButtonItemStylePlain
+										target:self
+										action:@selector(settingsTapped)];
+	// 齿轮在左，+ 在最右，符合习惯。
+	self.navigationItem.rightBarButtonItems = @[ addItem, settingsItem ];
+
+	// 存储位置增删、以及从后台切回来（可能插回了外接盘）都刷新一次冻结状态。
+	[NSNotificationCenter.defaultCenter addObserver:self
+										   selector:@selector(storageDidChange)
+											   name:VLStorageManager.didChangeNotification
+											 object:nil];
+	[NSNotificationCenter.defaultCenter addObserver:self
+										   selector:@selector(storageDidChange)
+											   name:UIApplicationDidBecomeActiveNotification
+											 object:nil];
+}
+
+- (void)storageDidChange {
+	[self.tableView reloadData];
+}
+
+- (void)settingsTapped {
+	VLSettingsViewController *settings = [[VLSettingsViewController alloc] init];
+	UINavigationController *navigationController =
+		[[UINavigationController alloc] initWithRootViewController:settings];
+	navigationController.modalPresentationStyle = UIModalPresentationFormSheet;
+	[self presentViewController:navigationController animated:YES completion:nil];
 }
 
 - (void)selectConfigurationAtIndex:(NSUInteger)index {
@@ -92,10 +122,12 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 	}
 
 	VLVMConfiguration *machine = self.machines[(NSUInteger)indexPath.row];
+	BOOL frozen = !machine.isStorageAvailable;
 	cell.textLabel.text = machine.name;
 	cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-	cell.detailTextLabel.text = machine.summary;
-	cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+	cell.textLabel.textColor = frozen ? UIColor.secondaryLabelColor : UIColor.labelColor;
+	cell.detailTextLabel.text = frozen ? @"存储不可用 · 已冻结" : machine.summary;
+	cell.detailTextLabel.textColor = frozen ? UIColor.systemOrangeColor : UIColor.secondaryLabelColor;
 	// 自定义图标优先，没导入时才用发行版官方图标。
 	UIImage *customIcon = machine.iconPath.length > 0
 		? [UIImage imageWithContentsOfFile:machine.iconPath]
@@ -104,6 +136,7 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 		? [VLDistroIcon thumbnailForImage:customIcon size:28.0]
 		: [VLDistroIcon thumbnailForIdentifier:machine.distroIdentifier size:28.0];
 	cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
+	cell.imageView.alpha = frozen ? 0.35 : 1.0;
 	cell.accessoryType = UITableViewCellAccessoryNone;
 
 	return cell;
@@ -145,7 +178,7 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 	UIAlertController *alert =
 		[UIAlertController alertControllerWithTitle:@"删除虚拟机"
 											message:[NSString stringWithFormat:
-													 @"「%@」将从列表移除，磁盘镜像文件仍保留在设备上。",
+													 @"「%@」以及它的所有磁盘镜像、ISO 文件都会被永久删除，无法恢复。",
 													 machine.name]
 									 preferredStyle:UIAlertControllerStyleAlert];
 
@@ -170,9 +203,17 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 	BOOL wasSelected = self.tableView.indexPathForSelectedRow != nil &&
 		self.tableView.indexPathForSelectedRow.row == (NSInteger)index;
 
-	[VLVMStore.sharedStore removeMachine:machine];
+	if (![VLVMStore.sharedStore removeMachine:machine]) {
+		UIAlertController *error =
+			[UIAlertController alertControllerWithTitle:@"删除失败"
+												message:@"磁盘文件删不掉，可能是外接存储已断开。虚拟机仍保留在列表里。"
+										 preferredStyle:UIAlertControllerStyleAlert];
+		[error addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+		[self presentViewController:error animated:YES completion:nil];
+		return;
+	}
 	self.machines = [VLVMStore.sharedStore.machines mutableCopy];
-	[VLStartupLog log:@"列表移除虚拟机：%@", machine.name];
+	[VLStartupLog log:@"已删除虚拟机（含磁盘文件）：%@", machine.name];
 
 	[self.tableView deleteRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:(NSInteger)index inSection:0] ]
 						  withRowAnimation:UITableViewRowAnimationAutomatic];

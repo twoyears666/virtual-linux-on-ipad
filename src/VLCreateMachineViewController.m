@@ -6,7 +6,9 @@
 
 #import "VLDistroIcon.h"
 #import "VLHostCapabilities.h"
+#import "VLISOInstaller.h"
 #import "VLStartupLog.h"
+#import "VLStorageManager.h"
 #import "VLVMConfiguration.h"
 
 @interface VLCreateMachineViewController () <UIDocumentPickerDelegate>
@@ -23,6 +25,10 @@
 @property (nonatomic, strong) UILabel *memoryValueLabel;
 @property (nonatomic, strong) UISlider *diskSlider;
 @property (nonatomic, strong) UILabel *diskValueLabel;
+
+/// 这次把虚拟机装到哪个已登记的存储位置。
+@property (nonatomic, strong) VLStorageLocation *selectedLocation;
+@property (nonatomic, strong) UIButton *storageButton;
 
 @property (nonatomic, strong) NSURL *isoURL;
 @property (nonatomic, strong) UILabel *isoLabel;
@@ -49,6 +55,7 @@
 		_suggestedName = [suggestedName copy];
 		_selectedDistro = @"linux";
 		_distroButtons = [NSMutableArray array];
+		_selectedLocation = VLStorageManager.sharedManager.defaultLocation;
 	}
 	return self;
 }
@@ -231,16 +238,67 @@
 	self.diskValueLabel = [self valueLabelWithText:@"16 GB"];
 	self.diskSlider = [self sliderWithMin:4.0 max:64.0 value:16.0 action:@selector(diskSliderChanged:)];
 
+	// 存放位置：默认本机存储，可切到已登记的外接目录。
+	self.storageButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	self.storageButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	self.storageButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+	self.storageButton.showsMenuAsPrimaryAction = YES;
+	[self.storageButton setTitleColor:UIColor.labelColor forState:UIControlStateNormal];
+	self.storageButton.menu = [self storageMenu];
+	[self updateStorageButton];
+
 	UILabel *note = [[UILabel alloc] init];
 	note.text = @"这是系统盘容量，创建后可在详情页添加更多磁盘";
 	note.numberOfLines = 0;
 	note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	note.textColor = UIColor.secondaryLabelColor;
 
+	UILabel *storageNote = [[UILabel alloc] init];
+	storageNote.text = @"外接目录可在设置页添加；目录丢失时该虚拟机自动冻结";
+	storageNote.numberOfLines = 0;
+	storageNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	storageNote.textColor = UIColor.secondaryLabelColor;
+
 	return [self cardWithTitle:@"存储" rows:@[
+		[self rowWithTitle:@"存放位置" control:self.storageButton],
 		[self blockRowWithTitle:@"系统盘容量" slider:self.diskSlider valueLabel:self.diskValueLabel],
 		note,
+		storageNote,
 	]];
+}
+
+- (UIMenu *)storageMenu {
+	NSMutableArray<UIAction *> *actions = [NSMutableArray array];
+	__weak typeof(self) weakSelf = self;
+
+	for (VLStorageLocation *location in VLStorageManager.sharedManager.locations) {
+		NSString *title = location.isAvailable
+			? location.name
+			: [NSString stringWithFormat:@"%@（不可用）", location.name];
+		UIAction *action =
+			[UIAction actionWithTitle:title
+								image:[UIImage systemImageNamed:location.isBuiltIn ? @"ipad" : @"externaldrive"]
+						   identifier:nil
+							  handler:^(UIAction *selected) {
+			weakSelf.selectedLocation = location;
+			[weakSelf updateStorageButton];
+		}];
+		action.state = [location.identifier isEqualToString:self.selectedLocation.identifier]
+			? UIMenuElementStateOn
+			: UIMenuElementStateOff;
+		[actions addObject:action];
+	}
+
+	return [UIMenu menuWithTitle:@"" children:actions];
+}
+
+- (void)updateStorageButton {
+	VLStorageLocation *location = self.selectedLocation ?: VLStorageManager.sharedManager.defaultLocation;
+	NSString *title = location.isAvailable
+		? location.name
+		: [NSString stringWithFormat:@"%@（不可用）", location.name];
+	[self.storageButton setTitle:title forState:UIControlStateNormal];
+	self.storageButton.menu = [self storageMenu];
 }
 
 - (UIView *)isoCard {
@@ -436,16 +494,26 @@
 
 	[self reportProgress:0.10 status:@"创建虚拟机目录…"];
 
-	NSURL *documents = [fileManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
-	NSURL *machineDirectory = [[documents URLByAppendingPathComponent:@"VirtualMachines" isDirectory:YES]
-		URLByAppendingPathComponent:NSUUID.UUID.UUIDString
-					  isDirectory:YES];
+	VLStorageLocation *location = self.selectedLocation ?: VLStorageManager.sharedManager.defaultLocation;
+	if (location == nil || !location.isAvailable) {
+		if (error != NULL) {
+			*error = [NSError errorWithDomain:@"com.twoyears666.virtuallinux.create"
+										 code:4
+									 userInfo:@{ NSLocalizedDescriptionKey : @"存放位置不可用，请在设置页换一个位置" }];
+		}
+		return NO;
+	}
+
+	NSURL *machineDirectory = [location machineDirectoryForIdentifier:NSUUID.UUID.UUIDString];
 	if (![fileManager createDirectoryAtURL:machineDirectory
 			   withIntermediateDirectories:YES
 								attributes:nil
 									 error:error]) {
 		return NO;
 	}
+
+	configuration.rootPath = machineDirectory.path;
+	configuration.storageIdentifier = location.identifier;
 
 	[self reportProgress:0.20 status:@"拷贝自定义图标…"];
 	if (self.iconURL != nil) {
@@ -468,6 +536,23 @@
 	}
 	configuration.isoPath = isoDestination.path;
 
+	// 解析 ISO：Debian 系抽出内核 + initrd 并生成 preseed，供后端直接启动安装。
+	[self reportProgress:0.40 status:@"解析 ISO 并抽取内核…"];
+	VLISOInstallResult *isoResult =
+		[VLISOInstaller prepareISOAtPath:isoDestination.path
+						machineDirectory:machineDirectory
+					   distroIdentifier:configuration.distroIdentifier
+								  error:NULL];
+	if (isoResult != nil) {
+		configuration.kernelPath = isoResult.kernelPath;
+		configuration.initrdPath = isoResult.initrdPath;
+		configuration.preseedPath = isoResult.preseedPath ?: @"";
+		[VLStartupLog log:@"ISO 自动安装准备完成：%@", isoResult.summary];
+	} else {
+		// 认不出来不算失败：ISO 已拷好，等后端支持其它发行版后再补。
+		[VLStartupLog log:@"ISO 未识别，跳过自动安装准备：%@", isoDestination.lastPathComponent];
+	}
+
 	NSURL *disksDirectory = [machineDirectory URLByAppendingPathComponent:@"disks" isDirectory:YES];
 	if (![fileManager createDirectoryAtURL:disksDirectory
 			   withIntermediateDirectories:YES
@@ -479,7 +564,7 @@
 	NSUInteger diskCount = configuration.disks.count;
 	for (NSUInteger index = 0; index < diskCount; index++) {
 		VLDiskImage *disk = configuration.disks[index];
-		[self reportProgress:0.30 + 0.6 * ((CGFloat)(index + 1) / (CGFloat)diskCount)
+		[self reportProgress:0.45 + 0.5 * ((CGFloat)(index + 1) / (CGFloat)diskCount)
 					 status:[NSString stringWithFormat:@"创建 %@ 镜像…", disk.name]];
 
 		NSURL *imageURL = [disksDirectory URLByAppendingPathComponent:

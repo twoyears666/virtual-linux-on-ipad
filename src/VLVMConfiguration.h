@@ -60,6 +60,15 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 @property (nonatomic, copy) NSString *initrdPath;
 /// 安装镜像（ISO）在沙盒里的路径，为空表示未导入。
 @property (nonatomic, copy) NSString *isoPath;
+/// 虚拟机目录的绝对路径（<存储位置>/<UUID>），由置备阶段写入。
+@property (nonatomic, copy) NSString *rootPath;
+/// 所属存储位置标识，见 VLStorageManager；为空表示还没分配位置。
+@property (nonatomic, copy) NSString *storageIdentifier;
+/// 自动安装应答文件（preseed.cfg）路径；非 Debian 系可能为空。
+@property (nonatomic, copy) NSString *preseedPath;
+/// 存储目录是否还在。路径为空（还没置备）时视为可用；
+/// 路径存在但目录消失（外接盘拔掉、目录被删）时虚拟机被冻结。
+@property (nonatomic, readonly, getter=isStorageAvailable) BOOL storageAvailable;
 /// 自定义图标路径；为空时按发行版标识显示官方图标。
 @property (nonatomic, copy) NSString *iconPath;
 /// 发行版标识（alpine / debian / ubuntu / arch / fedora / linux），用于列表图标。

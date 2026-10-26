@@ -58,6 +58,9 @@
 		_name = @"新建虚拟机";
 		_notes = @"";
 		_isoPath = @"";
+		_rootPath = @"";
+		_storageIdentifier = @"";
+		_preseedPath = @"";
 		_iconPath = @"";
 		_distroIdentifier = @"linux";
 		_cpuCores = 4;
@@ -74,6 +77,16 @@
 		_keyboardCapture = YES;
 	}
 	return self;
+}
+
+- (BOOL)isStorageAvailable {
+	if (self.rootPath.length == 0) {
+		// 还没置备的条目（例如内置样机）没有真实目录，按可用处理。
+		return YES;
+	}
+	BOOL isDirectory = NO;
+	BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:self.rootPath isDirectory:&isDirectory];
+	return exists && isDirectory;
 }
 
 - (VLDiskImage *)addDiskWithSizeGB:(NSUInteger)sizeGB {

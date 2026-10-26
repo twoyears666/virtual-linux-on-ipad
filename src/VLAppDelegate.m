@@ -2,6 +2,7 @@
 
 #import "VLRootSplitViewController.h"
 #import "VLStartupLog.h"
+#import "VLStorageManager.h"
 
 // 兜底界面：即使主界面初始化失败，也要能把失败原因显示出来（并写入日志）
 static UIViewController *VLFallbackViewController(NSString *message) {
@@ -30,6 +31,11 @@ static UIViewController *VLFallbackViewController(NSString *message) {
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 	[VLStartupLog log:@"didFinishLaunching 进入"];
+
+	// 恢复外接存储位置的安全作用域访问权，让已登记的目录重新可用。
+	[VLStorageManager.sharedManager restoreAccess];
+	[VLStartupLog log:@"存储位置已恢复：%lu 个",
+		(unsigned long)VLStorageManager.sharedManager.locations.count];
 
 	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
 	[VLStartupLog log:@"UIWindow 创建完成"];
