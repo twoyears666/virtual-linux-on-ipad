@@ -1,6 +1,7 @@
 #import "VLSidebarViewController.h"
 
 #import "VLCreateMachineViewController.h"
+#import "VLDistroIcon.h"
 #import "VLStartupLog.h"
 #import "VLVMStore.h"
 
@@ -95,8 +96,11 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 	cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
 	cell.detailTextLabel.text = machine.summary;
 	cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
-	cell.imageView.image = [UIImage systemImageNamed:@"desktopcomputer"];
-	cell.imageView.tintColor = tableView.tintColor;
+	cell.imageView.image =
+		[UIImage systemImageNamed:[VLDistroIcon symbolNameForIdentifier:machine.distroIdentifier]
+			   withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:24.0
+																			   weight:UIImageSymbolWeightMedium]];
+	cell.imageView.tintColor = [VLDistroIcon colorForIdentifier:machine.distroIdentifier];
 	cell.accessoryType = UITableViewCellAccessoryNone;
 
 	return cell;

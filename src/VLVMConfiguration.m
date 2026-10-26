@@ -10,10 +10,12 @@
 	configuration.notes = @"";
 	configuration.kernelPath = @"";
 	configuration.initrdPath = @"";
+	configuration.isoPath = @"";
+	configuration.distroIdentifier = @"linux";
 	configuration.cpuCores = 4;
 	configuration.memoryMB = memoryMB;
-	configuration.diskGB = diskGB;
-	configuration.diskReadOnly = NO;
+	configuration.disks = [NSMutableArray arrayWithObject:[VLDiskImage diskWithName:@"磁盘 1" sizeGB:diskGB]];
+	configuration.diskImageReady = NO;
 	configuration.resolution = VLDisplayResolution1024x768;
 	configuration.displayScale = VLDisplayScaleFit;
 	configuration.networkMode = VLNetworkModeShared;
@@ -29,9 +31,11 @@
 	if (self) {
 		_name = @"新建虚拟机";
 		_notes = @"";
+		_isoPath = @"";
+		_distroIdentifier = @"linux";
 		_cpuCores = 4;
 		_memoryMB = 2048;
-		_diskGB = 16;
+		_disks = [NSMutableArray arrayWithObject:[VLDiskImage diskWithName:@"磁盘 1" sizeGB:16]];
 		_resolution = VLDisplayResolution1024x768;
 		_displayScale = VLDisplayScaleFit;
 		_networkMode = VLNetworkModeShared;
@@ -43,11 +47,42 @@
 	return self;
 }
 
+- (VLDiskImage *)addDiskWithSizeGB:(NSUInteger)sizeGB {
+	if (self.disks == nil) {
+		self.disks = [NSMutableArray array];
+	}
+	VLDiskImage *disk = [VLDiskImage diskWithName:[NSString stringWithFormat:@"磁盘 %lu",
+												   (unsigned long)self.disks.count + 1]
+										   sizeGB:sizeGB];
+	[self.disks addObject:disk];
+	return disk;
+}
+
+- (BOOL)removeDisk:(VLDiskImage *)disk {
+	if (disk == nil || self.disks.count <= 1) {
+		return NO;
+	}
+	[self.disks removeObject:disk];
+	// 重新编号，保证界面上的「磁盘 N」连续。
+	for (NSUInteger index = 0; index < self.disks.count; index++) {
+		self.disks[index].name = [NSString stringWithFormat:@"磁盘 %lu", (unsigned long)index + 1];
+	}
+	return YES;
+}
+
+- (NSUInteger)totalDiskGB {
+	NSUInteger total = 0;
+	for (VLDiskImage *disk in self.disks) {
+		total += disk.sizeGB;
+	}
+	return total;
+}
+
 - (NSString *)summary {
 	return [NSString stringWithFormat:@"%lu 核 · %lu MB · %lu GB",
 			(unsigned long)self.cpuCores,
 			(unsigned long)self.memoryMB,
-			(unsigned long)self.diskGB];
+			(unsigned long)self.totalDiskGB];
 }
 
 - (NSString *)resolutionString {

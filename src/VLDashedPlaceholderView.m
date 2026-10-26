@@ -4,6 +4,7 @@
 
 @property (nonatomic, strong) CAShapeLayer *borderLayer;
 @property (nonatomic, strong) UILabel *textLabel;
+@property (nonatomic, strong) UILabel *hintLabel;
 
 @end
 
@@ -36,14 +37,37 @@
 	self.textLabel.textColor = UIColor.secondaryLabelColor;
 	[self addSubview:self.textLabel];
 
+	// 占位区本身也是启动入口，给一行明确的提示。
+	self.hintLabel = [[UILabel alloc] init];
+	self.hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+	self.hintLabel.text = @"▶ 点按此处直接启动";
+	self.hintLabel.textAlignment = NSTextAlignmentCenter;
+	self.hintLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+	self.hintLabel.textColor = UIColor.systemBlueColor;
+	[self addSubview:self.hintLabel];
+
 	[NSLayoutConstraint activateConstraints:@[
 		[self.textLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
 		[self.textLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
 		[self.textLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:16.0],
 		[self.textLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-16.0],
+
+		[self.hintLabel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+		[self.hintLabel.topAnchor constraintEqualToAnchor:self.textLabel.bottomAnchor constant:8.0],
 	]];
 
+	UITapGestureRecognizer *tap =
+		[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap)];
+	[self addGestureRecognizer:tap];
+	self.userInteractionEnabled = YES;
+
 	[self updateColors];
+}
+
+- (void)handleTap {
+	if (self.onTap) {
+		self.onTap();
+	}
 }
 
 - (void)layoutSubviews {

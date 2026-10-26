@@ -25,12 +25,14 @@
 		VLVMConfiguration *alpine =
 			[VLVMConfiguration sampleConfigurationWithName:@"Alpine Linux" memoryMB:2048 diskGB:16];
 		alpine.cpuCores = 4;
+		alpine.distroIdentifier = @"alpine";
 		alpine.resolution = VLDisplayResolution1024x768;
 		[_mutableMachines addObject:alpine];
 
 		VLVMConfiguration *debian =
 			[VLVMConfiguration sampleConfigurationWithName:@"Debian 12" memoryMB:4096 diskGB:32];
 		debian.cpuCores = 6;
+		debian.distroIdentifier = @"debian";
 		debian.resolution = VLDisplayResolution1280x800;
 		debian.networkMode = VLNetworkModeBridged;
 		[_mutableMachines addObject:debian];

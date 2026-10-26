@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 APPLICATION_NAME = VirtualLinux
 
 VirtualLinux_FILES = $(wildcard src/*.m)
-VirtualLinux_FRAMEWORKS = UIKit Foundation
+VirtualLinux_FRAMEWORKS = UIKit Foundation UniformTypeIdentifiers
 VirtualLinux_CFLAGS = -fobjc-arc -Wall
 VirtualLinux_CODESIGN_FLAGS = -Sentitlements.plist
 VirtualLinux_INSTALL_PATH = /Applications

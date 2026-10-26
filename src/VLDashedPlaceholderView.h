@@ -6,4 +6,7 @@
 
 @property (nonatomic, copy) NSString *text;
 
+/// 点按整个占位区的回调（当前用于直接启动虚拟机）。
+@property (nonatomic, copy) void (^onTap)(void);
+
 @end

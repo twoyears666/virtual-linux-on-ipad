@@ -15,7 +15,7 @@
 @property (nonatomic, strong) UITextField *nameField;
 @property (nonatomic, strong) UILabel *cpuValueLabel;
 @property (nonatomic, strong) UILabel *memoryValueLabel;
-@property (nonatomic, strong) UILabel *diskValueLabel;
+@property (nonatomic, strong) NSMutableArray<UILabel *> *diskValueLabels;
 @property (nonatomic, strong) UIButton *resolutionButton;
 @property (nonatomic, strong) UILabel *statusLabel;
 
@@ -67,6 +67,8 @@
 - (void)rebuildContent {
 	[VLStartupLog log:@"详情界面 重建开始"];
 
+	self.diskValueLabels = [NSMutableArray array];
+
 	for (UIView *view in self.stackView.arrangedSubviews) {
 		[self.stackView removeArrangedSubview:view];
 		[view removeFromSuperview];
@@ -83,10 +85,14 @@
 
 	VLVMConfiguration *configuration = self.configuration;
 
-	// 截图占位：不是必须的图，先画虚线框标注清楚位置。
+	// 截图占位：不是必须的图，先画虚线框标注清楚位置；点按即启动。
 	VLDashedPlaceholderView *placeholder = [[VLDashedPlaceholderView alloc] init];
 	placeholder.translatesAutoresizingMaskIntoConstraints = NO;
 	placeholder.text = [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
+	__weak typeof(self) weakSelf = self;
+	placeholder.onTap = ^{
+		[weakSelf startTapped];
+	};
 	[placeholder.heightAnchor constraintEqualToConstant:220.0].active = YES;
 	[self.stackView addArrangedSubview:placeholder];
 	[VLStartupLog log:@"详情界面 截图占位完成"];
@@ -115,6 +121,9 @@
 																		  text:configuration.initrdPath
 																		action:@selector(initrdPathChanged:)]],
 		[self rowWithTitle:@"客户机架构" control:[self valueLabelWithText:@"arm64"]],
+		[self rowWithTitle:@"安装镜像" control:[self valueLabelWithText:configuration.isoPath.length > 0
+																		? configuration.isoPath.lastPathComponent
+																		: @"未导入"]],
 	]]];
 	[VLStartupLog log:@"详情界面 系统卡片完成"];
 
@@ -138,27 +147,28 @@
 	]]];
 	[VLStartupLog log:@"详情界面 硬件卡片完成"];
 
-	// 存储：镜像尚未创建前可随意改容量；真正扩容要等后端接入
-	self.diskValueLabel =
-		[self valueLabelWithText:[NSString stringWithFormat:@"%lu GB", (unsigned long)configuration.diskGB]];
-	UISlider *diskSlider = [self sliderWithMin:4.0
-										  max:64.0
-										value:(CGFloat)configuration.diskGB
-									   action:@selector(diskSliderChanged:)];
+	// 存储：多块盘各自独立，第一块是系统盘；镜像尚未创建前容量随意改
+	NSMutableArray<UIView *> *storageRows = [NSMutableArray array];
+	NSUInteger diskIndex = 0;
+	for (VLDiskImage *disk in configuration.disks) {
+		[storageRows addObject:[self diskBlockForDisk:disk index:diskIndex]];
+		diskIndex++;
+	}
+
+	UIButton *addDiskButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[addDiskButton setTitle:@"＋ 添加磁盘" forState:UIControlStateNormal];
+	addDiskButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	[addDiskButton addTarget:self action:@selector(addDiskTapped) forControlEvents:UIControlEventTouchUpInside];
+	[storageRows addObject:addDiskButton];
 
 	UILabel *diskNote = [[UILabel alloc] init];
-	diskNote.text = @"首次启动前可随意调整；镜像创建后改容量会新建镜像，原数据不保留";
+	diskNote.text = @"每块盘是独立镜像，首次启动前容量随意改；镜像创建后改容量会新建镜像，原数据不保留";
 	diskNote.numberOfLines = 0;
 	diskNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	diskNote.textColor = UIColor.secondaryLabelColor;
+	[storageRows addObject:diskNote];
 
-	[self.stackView addArrangedSubview:[self cardWithTitle:@"存储" rows:@[
-		[self blockRowWithTitle:@"磁盘容量" control:diskSlider valueLabel:self.diskValueLabel],
-		[self rowWithTitle:@"磁盘镜像" control:[self valueLabelWithText:@"新建空白镜像"]],
-		[self rowWithTitle:@"只读" control:[self switchWithOn:configuration.diskReadOnly
-													  action:@selector(diskReadOnlyChanged:)]],
-		diskNote,
-	]]];
+	[self.stackView addArrangedSubview:[self cardWithTitle:@"存储" rows:storageRows]];
 	[VLStartupLog log:@"详情界面 存储卡片完成"];
 
 	// 显示
@@ -460,11 +470,6 @@
 	[self notifyChange];
 }
 
-- (void)diskReadOnlyChanged:(UISwitch *)sender {
-	self.configuration.diskReadOnly = sender.isOn;
-	[self notifyChange];
-}
-
 - (void)mouseCaptureChanged:(UISwitch *)sender {
 	self.configuration.mouseCapture = sender.isOn;
 	[self notifyChange];
@@ -494,9 +499,67 @@
 - (void)diskSliderChanged:(UISlider *)sender {
 	NSUInteger gigabytes = (NSUInteger)(MAX(4.0, roundf(sender.value / 4.0)) * 4.0);
 	sender.value = (float)gigabytes;
-	self.configuration.diskGB = gigabytes;
-	self.diskValueLabel.text = [NSString stringWithFormat:@"%lu GB", (unsigned long)gigabytes];
+
+	NSInteger index = sender.tag;
+	if (index < 0 || index >= (NSInteger)self.configuration.disks.count) {
+		return;
+	}
+	self.configuration.disks[(NSUInteger)index].sizeGB = gigabytes;
+	if (index < (NSInteger)self.diskValueLabels.count) {
+		self.diskValueLabels[(NSUInteger)index].text =
+			[NSString stringWithFormat:@"%lu GB", (unsigned long)gigabytes];
+	}
 	[self notifyChange];
+}
+
+- (void)addDiskTapped {
+	// 新盘默认 8 GB，容量可在下面那条滑块上改。
+	[self.configuration addDiskWithSizeGB:8];
+	[VLStartupLog log:@"项目添加磁盘：现共 %lu 块", (unsigned long)self.configuration.disks.count];
+	[self rebuildContent];
+	[self notifyChange];
+}
+
+- (void)removeDiskTapped:(UIButton *)sender {
+	NSInteger index = sender.tag;
+	if (index < 0 || index >= (NSInteger)self.configuration.disks.count) {
+		return;
+	}
+	[self.configuration removeDisk:self.configuration.disks[(NSUInteger)index]];
+	[VLStartupLog log:@"项目移除磁盘：现共 %lu 块", (unsigned long)self.configuration.disks.count];
+	[self rebuildContent];
+	[self notifyChange];
+}
+
+- (UIView *)diskBlockForDisk:(VLDiskImage *)disk index:(NSUInteger)index {
+	UILabel *valueLabel =
+		[self valueLabelWithText:[NSString stringWithFormat:@"%lu GB", (unsigned long)disk.sizeGB]];
+	[self.diskValueLabels addObject:valueLabel];
+
+	UISlider *slider = [self sliderWithMin:4.0
+									   max:64.0
+									 value:(CGFloat)disk.sizeGB
+									action:@selector(diskSliderChanged:)];
+	slider.tag = (NSInteger)index;
+
+	UIView *block = [self blockRowWithTitle:disk.name control:slider valueLabel:valueLabel];
+	if (index == 0) {
+		// 第一块是系统盘，不允许删除。
+		return block;
+	}
+
+	UIButton *removeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[removeButton setTitle:@"移除该磁盘" forState:UIControlStateNormal];
+	removeButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+	[removeButton setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
+	removeButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+	removeButton.tag = (NSInteger)index;
+	[removeButton addTarget:self action:@selector(removeDiskTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+	UIStackView *column = [[UIStackView alloc] initWithArrangedSubviews:@[ block, removeButton ]];
+	column.axis = UILayoutConstraintAxisVertical;
+	column.spacing = 4.0;
+	return column;
 }
 
 #pragma mark - 启动

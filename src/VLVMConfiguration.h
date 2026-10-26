@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+#import "VLDiskImage.h"
+
 typedef NS_ENUM(NSInteger, VLDisplayResolution) {
 	VLDisplayResolution1024x768 = 0,
 	VLDisplayResolution1280x800,
@@ -32,11 +34,16 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 
 @property (nonatomic, copy) NSString *kernelPath;
 @property (nonatomic, copy) NSString *initrdPath;
+/// 安装镜像（ISO）在沙盒里的路径，为空表示未导入。
+@property (nonatomic, copy) NSString *isoPath;
+/// 发行版标识（alpine / debian / ubuntu / arch / fedora / linux），用于列表图标。
+@property (nonatomic, copy) NSString *distroIdentifier;
 
 @property (nonatomic, assign) NSUInteger cpuCores;
 @property (nonatomic, assign) NSUInteger memoryMB;
-@property (nonatomic, assign) NSUInteger diskGB;
-@property (nonatomic, assign) BOOL diskReadOnly;
+/// 多块磁盘：第一块是系统盘，其余为数据盘。
+@property (nonatomic, strong) NSMutableArray<VLDiskImage *> *disks;
+@property (nonatomic, assign) BOOL diskImageReady;
 
 @property (nonatomic, assign) VLDisplayResolution resolution;
 @property (nonatomic, assign) VLDisplayScale displayScale;
@@ -51,6 +58,14 @@ typedef NS_ENUM(NSInteger, VLInputMode) {
 + (instancetype)sampleConfigurationWithName:(NSString *)name
 								   memoryMB:(NSUInteger)memoryMB
 									 diskGB:(NSUInteger)diskGB;
+
+/// 追加一块盘，返回它。
+- (VLDiskImage *)addDiskWithSizeGB:(NSUInteger)sizeGB;
+/// 删除除系统盘外的指定盘；系统盘不可删。
+- (BOOL)removeDisk:(VLDiskImage *)disk;
+
+/// 所有磁盘容量之和（GB）。
+- (NSUInteger)totalDiskGB;
 
 /// 列表行副标题，例如「4 核 · 2048 MB · 32 GB」。
 - (NSString *)summary;
