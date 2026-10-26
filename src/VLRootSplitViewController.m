@@ -15,6 +15,12 @@
 
 @implementation VLRootSplitViewController
 
+// UISplitViewController 从 iOS 14 起必须用 initWithStyle: 创建，
+// 直接 -init 后再设 preferredDisplayMode 会抛 NSInvalidArgumentException。
+- (instancetype)init {
+	return [self initWithStyle:UISplitViewControllerStyleDoubleColumn];
+}
+
 - (void)viewDidLoad {
 	[super viewDidLoad];
 
