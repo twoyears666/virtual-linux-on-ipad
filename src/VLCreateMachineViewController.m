@@ -97,7 +97,7 @@
 	self.diskSlider = [self sliderWithMin:4.0 max:64.0 value:16.0 action:@selector(diskSliderChanged:)];
 
 	UILabel *diskNote = [[UILabel alloc] init];
-	diskNote.text = @"创建后仍可在详情页调整容量，下次启动时应用";
+	diskNote.text = @"创建后仍可在详情页调整；镜像首次创建前改动才生效";
 	diskNote.numberOfLines = 0;
 	diskNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	diskNote.textColor = UIColor.secondaryLabelColor;

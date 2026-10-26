@@ -138,7 +138,7 @@
 	]]];
 	[VLStartupLog log:@"详情界面 硬件卡片完成"];
 
-	// 存储：容量随时可改，下次启动时按当前值创建/扩容磁盘镜像
+	// 存储：镜像尚未创建前可随意改容量；真正扩容要等后端接入
 	self.diskValueLabel =
 		[self valueLabelWithText:[NSString stringWithFormat:@"%lu GB", (unsigned long)configuration.diskGB]];
 	UISlider *diskSlider = [self sliderWithMin:4.0
@@ -147,7 +147,7 @@
 									   action:@selector(diskSliderChanged:)];
 
 	UILabel *diskNote = [[UILabel alloc] init];
-	diskNote.text = @"容量随时可调，下次启动时按该值创建或扩容磁盘镜像";
+	diskNote.text = @"首次启动前可随意调整；镜像创建后改容量会新建镜像，原数据不保留";
 	diskNote.numberOfLines = 0;
 	diskNote.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	diskNote.textColor = UIColor.secondaryLabelColor;
