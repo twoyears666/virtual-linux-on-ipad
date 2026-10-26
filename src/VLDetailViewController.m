@@ -5,6 +5,7 @@
 #import "VLDashedPlaceholderView.h"
 #import "VLHostCapabilities.h"
 #import "VLLinuxVirtualMachine.h"
+#import "VLStartupLog.h"
 
 @interface VLDetailViewController ()
 
@@ -64,6 +65,8 @@
 }
 
 - (void)rebuildContent {
+	[VLStartupLog log:@"详情界面 重建开始"];
+
 	for (UIView *view in self.stackView.arrangedSubviews) {
 		[self.stackView removeArrangedSubview:view];
 		[view removeFromSuperview];
@@ -86,6 +89,7 @@
 	placeholder.text = [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
 	[placeholder.heightAnchor constraintEqualToConstant:220.0].active = YES;
 	[self.stackView addArrangedSubview:placeholder];
+	[VLStartupLog log:@"详情界面 截图占位完成"];
 
 	// 基本信息
 	self.nameField = [self textFieldWithPlaceholder:@"虚拟机名称"
@@ -100,6 +104,7 @@
 																	  text:configuration.notes
 																	action:@selector(notesChanged:)]],
 	]]];
+	[VLStartupLog log:@"详情界面 基本信息卡片完成"];
 
 	// 系统
 	UISegmentedControl *bootMode =
@@ -116,6 +121,7 @@
 																		action:@selector(initrdPathChanged:)]],
 		[self rowWithTitle:@"客户机架构" control:[self valueLabelWithText:@"arm64"]],
 	]]];
+	[VLStartupLog log:@"详情界面 系统卡片完成"];
 
 	// 硬件
 	self.cpuValueLabel = [self valueLabelWithText:[NSString stringWithFormat:@"%lu 核", (unsigned long)configuration.cpuCores]];
@@ -135,6 +141,7 @@
 		[self blockRowWithTitle:@"CPU 核心数" control:cpuSlider valueLabel:self.cpuValueLabel],
 		[self blockRowWithTitle:@"内存" control:memorySlider valueLabel:self.memoryValueLabel],
 	]]];
+	[VLStartupLog log:@"详情界面 硬件卡片完成"];
 
 	// 存储
 	self.diskValueLabel =
@@ -150,6 +157,7 @@
 		[self rowWithTitle:@"只读" control:[self switchWithOn:configuration.diskReadOnly
 													  action:@selector(diskReadOnlyChanged:)]],
 	]]];
+	[VLStartupLog log:@"详情界面 存储卡片完成"];
 
 	// 显示
 	self.resolutionButton = [self resolutionButtonWithConfiguration:configuration];
@@ -164,6 +172,7 @@
 		[self blockRowWithTitle:@"缩放" control:scale valueLabel:nil],
 		[self rowWithTitle:@"显示设备" control:[self valueLabelWithText:@"virtio-gpu"]],
 	]]];
+	[VLStartupLog log:@"详情界面 显示卡片完成"];
 
 	// 网络
 	UISegmentedControl *network =
@@ -177,6 +186,7 @@
 																	 action:@selector(macAddressChanged:)]],
 		[self rowWithTitle:@"端口转发" control:[self valueLabelWithText:@"尚未添加"]],
 	]]];
+	[VLStartupLog log:@"详情界面 网络卡片完成"];
 
 	// 输入
 	UISegmentedControl *input =
@@ -190,6 +200,7 @@
 		[self rowWithTitle:@"捕获外接键盘" control:[self switchWithOn:configuration.keyboardCapture
 															 action:@selector(keyboardCaptureChanged:)]],
 	]]];
+	[VLStartupLog log:@"详情界面 输入卡片完成"];
 
 	// 运行环境：Hypervisor 是否可用直接摆在这里，省得再去翻日志。
 	UILabel *environmentLabel = [[UILabel alloc] init];
@@ -199,6 +210,7 @@
 	environmentLabel.text = [VLHostCapabilities diagnosticReport];
 
 	[self.stackView addArrangedSubview:[self cardWithTitle:@"运行环境" rows:@[ environmentLabel ]]];
+	[VLStartupLog log:@"详情界面 运行环境卡片完成"];
 
 	// 启动
 	UIButton *startButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -218,6 +230,8 @@
 	self.statusLabel.textColor = UIColor.secondaryLabelColor;
 	self.statusLabel.text = @"阶段：界面已就绪，虚拟化后端待接入";
 	[self.stackView addArrangedSubview:self.statusLabel];
+
+	[VLStartupLog log:@"详情界面 重建完成"];
 }
 
 #pragma mark - 控件构造

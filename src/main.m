@@ -1,9 +1,16 @@
 #import <UIKit/UIKit.h>
 
 #import "VLAppDelegate.h"
+#import "VLStartupLog.h"
 
 int main(int argc, char *argv[]) {
 	@autoreleasepool {
-		return UIApplicationMain(argc, argv, nil, NSStringFromClass([VLAppDelegate class]));
+		[VLStartupLog installExceptionHandlers];
+		[VLStartupLog log:@"进入 UIApplicationMain"];
+
+		int status = UIApplicationMain(argc, argv, nil, NSStringFromClass([VLAppDelegate class]));
+
+		[VLStartupLog log:@"UIApplicationMain 意外返回 %d", status];
+		return status;
 	}
 }

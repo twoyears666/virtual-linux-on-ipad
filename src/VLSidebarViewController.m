@@ -1,5 +1,6 @@
 #import "VLSidebarViewController.h"
 
+#import "VLStartupLog.h"
 #import "VLVMStore.h"
 
 static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
@@ -18,6 +19,8 @@ static NSString *const VLSidebarCellIdentifier = @"VLSidebarCellIdentifier";
 
 - (void)viewDidLoad {
 	[super viewDidLoad];
+
+	[VLStartupLog log:@"侧栏 viewDidLoad 进入"];
 
 	self.title = @"虚拟机";
 	self.machines = [VLVMStore.sharedStore.machines mutableCopy];

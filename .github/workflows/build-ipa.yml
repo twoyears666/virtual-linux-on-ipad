@@ -42,6 +42,14 @@ jobs:
           echo "APP_PATH=$app" >> "$GITHUB_ENV"
           echo "定位到 $app"
 
+      - name: 以 adhoc 方式重新签名
+        run: |
+          set -euo pipefail
+          # 裸 Mach-O 无签名在 iOS 上会被直接 kill，这里显式打 adhoc 签名
+          ldid -S "$APP_PATH/VirtualLinux"
+          codesign -dv "$APP_PATH/VirtualLinux" 2>&1 | tee /tmp/codesign-info.txt
+          grep -q 'adhoc' /tmp/codesign-info.txt
+
       - name: 校验 IPA 不携带越狱权限
         run: |
           set -euo pipefail

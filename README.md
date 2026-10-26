@@ -57,6 +57,23 @@ make package FINALPACKAGE=1   # 出 rootless deb
 - IPA：界面测试包，不带任何越狱权限（`entitlements-ipa.plist` 是空字典）。TrollStore 直接装，或 AltStore / Sideloadly 用自己的证书重签；不越狱也能装来看界面。
 - 注意：IPA 只能看界面，真正启动虚拟机仍然必须越狱（要加载私有 Hypervisor 运行时）。
 
+## 闪退排查
+
+`UIFileSharingEnabled` 已打开，App 沙盒的 `Documents` 里会留两份自证日志：
+
+| 文件 | 内容 |
+| --- | --- |
+| `startup.log` | 启动阶段埋点，逐行带时间戳（窗口创建、根控制器、分栏装载、各设置卡片、首次布局） |
+| `crash.txt` | 未捕获异常的名称/原因/调用栈，以及 SIGABRT / SIGSEGV 等致命信号 |
+
+取日志方式：
+
+- 未越狱：文件 App → 我的 iPad → Virtual Linux → `startup.log` / `crash.txt`
+- 越狱：Filza 进 App 沙盒 `Documents`，或 Mac 上用 Finder 文件共享
+- 连电脑：Xcode → Devices and Simulators → 选中 App → 下载容器
+
+`startup.log` 最后一行就是崩溃前完成的最后一步，配合 `crash.txt` 的调用栈即可定位。
+
 ## 下一步
 
 1. 从 macOS 抽取 Hypervisor 栈，`ldid` 重签后放入 `Frameworks/`
