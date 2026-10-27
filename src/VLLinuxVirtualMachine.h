@@ -51,4 +51,7 @@ typedef NS_ENUM(NSInteger, VLVirtualMachineState) {
 - (void)sendTouchMovedToNormalizedX:(double)x y:(double)y;
 - (void)sendTouchEnded;
 
+/// 送一个 Linux evdev 按键码（KEY_A = 30 这一套），按下和抬起各调用一次。
+- (void)sendKeycode:(uint16_t)keycode pressed:(BOOL)pressed;
+
 @end
