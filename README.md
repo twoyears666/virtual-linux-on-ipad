@@ -37,8 +37,8 @@
 ## 当前状态
 
 - 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译、多存储位置与冻结、设置页与日志导出、ISO 安装盘解析（抽内核/initrd、Debian 系 preseed）、Hypervisor.framework 抽取与重签脚本。
-- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示；virtio-blk 挂载系统盘镜像；virtio-input 单点触摸屏，详情页里的手指位置直接送进客户机；virtio-net 出站网络（ARP / DHCP / DNS 转发 / TCP 代理）。
-- 尚未接入：端口转发（主机连进客户机）、virtio-net 的 UDP 直连与 IP 分片。
+- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示；virtio-blk 挂载系统盘镜像；virtio-input 单点触摸屏，详情页里的手指位置直接送进客户机；virtio-net 出站网络（ARP / DHCP / DNS 转发 / TCP 代理 / UDP 直连）。
+- 尚未接入：端口转发（主机连进客户机）、IP 分片。
 - 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地用 `tools/extract-hypervisor.py` 生成后自动打进 App 的 `Frameworks/`。
 
 ## 构建
@@ -70,7 +70,7 @@ App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` → `/var/jb/usr/l
 | Ubuntu 22.04 / 24.04（arm64，casper） | 识别 `casper`，抽出内核与 initrd | 只做抽取，没有自动应答 |
 | Alpine / Fedora / Arch 等 | 只按 `boot` / `isolinux` 目录兜底找 `vmlinuz` + `initrd` | 需要自己备好 arm64 内核与 initrd |
 
-网络说明：客户机固定 `10.0.2.15/24`，网关 `10.0.2.2` 兼 DHCP 与 ICMP，DNS `10.0.2.3` 转发到 `8.8.8.8`，TCP 出站用真实 socket 代理；UDP 只转 DNS，其它 UDP 和 IP 分片暂不支持。
+网络说明：客户机固定 `10.0.2.15/24`，网关 `10.0.2.2` 兼 DHCP 与 ICMP，DNS `10.0.2.3` 转发到 `8.8.8.8`；TCP 出站用真实 socket 代理；UDP 出站按「源端口 + 目的地址 + 目的端口」建一条直连流（网关、同网段与广播除外），空闲 60 秒回收；IP 分片暂不支持。
 
 结论：还没有哪个发行版能一键装完。现在能用的是「自带 arm64 内核 + initrd，配一块 virtio 磁盘镜像」这条路径；交互式安装还需要串口键盘或更完整的自动应答。
 
@@ -114,6 +114,6 @@ App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` → `/var/jb/usr/l
 ## 下一步
 
 1. 串口键盘（把客户机的 /dev/ttyAMA0 接上输入），交互式安装才有可能
-2. 端口转发与 UDP 直连，让主机能连进客户机
+2. 端口转发（主机连进客户机）与 IP 分片重组
 3. 内置或导入可启动的根文件系统（virtio-blk 已能挂载镜像）
 4. 真机验证 GIC 中断注入、EL1 虚拟定时器与 virtio 队列收发
