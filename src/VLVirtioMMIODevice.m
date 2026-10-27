@@ -130,7 +130,8 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 }
 
 - (uint32_t)handleDescriptorChain:(NSArray<VLVirtioBufferDescriptor *> *)chain
-							 head:(uint16_t)head {
+							 head:(uint16_t)head
+					   queueIndex:(uint32_t)queueIndex {
 	return 0;
 }
 
@@ -302,7 +303,7 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 		NSArray<VLVirtioBufferDescriptor *> *chain =
 			[self chainAtTable:descriptorBase head:head count:state->num];
 		uint32_t usedLength = chain.count > 0
-			? [self handleDescriptorChain:chain head:head]
+			? [self handleDescriptorChain:chain head:head queueIndex:index]
 			: 0;
 
 		state->lastAvailable++;

@@ -172,7 +172,8 @@ static void VLInputWriteLE32(uint8_t *bytes, uint32_t value) {
 #pragma mark - 事件队列
 
 - (uint32_t)handleDescriptorChain:(NSArray<VLVirtioBufferDescriptor *> *)chain
-							 head:(uint16_t)head {
+							 head:(uint16_t)head
+					   queueIndex:(uint32_t)queueIndex {
 	VLVirtioBufferDescriptor *buffer = chain.firstObject;
 	if (buffer == nil || !buffer.writable || buffer.length < 8) {
 		return 0;

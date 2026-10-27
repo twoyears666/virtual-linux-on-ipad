@@ -43,8 +43,10 @@
 /// 队列深度上限，默认 8。
 - (uint32_t)queueNumMax;
 /// 处理一条描述符链，返回 used 环里要填的长度。
+/// queueIndex 是这条链来自哪个队列（网卡 0 = 接收、1 = 发送）。
 - (uint32_t)handleDescriptorChain:(NSArray<VLVirtioBufferDescriptor *> *)chain
-							 head:(uint16_t)head;
+							 head:(uint16_t)head
+					   queueIndex:(uint32_t)queueIndex;
 /// 是否在处理完链后立刻写 used 元素。输入设备要等真正有事件才回填，返回 NO。
 - (BOOL)completesChainImmediately;
 /// 配置空间（偏移 0x100 之后）的读，子类按自己的结构实现。

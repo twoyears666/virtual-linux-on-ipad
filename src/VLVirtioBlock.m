@@ -127,7 +127,8 @@ static uint64_t VLBlockReadLE64(const uint8_t *bytes) {
 #pragma mark - 请求
 
 - (uint32_t)handleDescriptorChain:(NSArray<VLVirtioBufferDescriptor *> *)chain
-							 head:(uint16_t)head {
+							 head:(uint16_t)head
+					   queueIndex:(uint32_t)queueIndex {
 	if (chain.count < 2) {
 		return 0;
 	}

@@ -43,7 +43,8 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 							 gicBase:(uint64_t)gicBase
 							 gpuBase:(uint64_t)gpuBase
 							 blockBase:(uint64_t)blockBase
-							 inputBase:(uint64_t)inputBase {
+							 inputBase:(uint64_t)inputBase
+							   netBase:(uint64_t)netBase {
 	VLDeviceTree *builder = [[VLDeviceTree alloc] init];
 	return [builder buildWithMemoryBase:memoryBase
 							 memorySize:memorySize
@@ -54,7 +55,8 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 								gicBase:gicBase
 								gpuBase:gpuBase
 							  blockBase:blockBase
-							  inputBase:inputBase];
+							  inputBase:inputBase
+								netBase:netBase];
 }
 
 - (instancetype)init {
@@ -78,7 +80,8 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 						gicBase:(uint64_t)gicBase
 						gpuBase:(uint64_t)gpuBase
 							 blockBase:(uint64_t)blockBase
-							 inputBase:(uint64_t)inputBase {
+							 inputBase:(uint64_t)inputBase
+							   netBase:(uint64_t)netBase {
 	[self beginNode:@""];
 
 	[self propertyNamed:@"compatible" string:@"linux,dummy-virt"];
@@ -183,6 +186,16 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					   @((uint32_t)(inputBase >> 32)), @((uint32_t)(inputBase & 0xFFFFFFFF)), @0x1000, @0,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @4, @4 ]];
+	[self endNode];
+
+	// virtio-net：SPI 5
+	[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)netBase]];
+	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
+	[self propertyNamed:@"reg"
+				   cells:@[
+					   @((uint32_t)(netBase >> 32)), @((uint32_t)(netBase & 0xFFFFFFFF)), @0x1000, @0,
+				   ]];
+	[self propertyNamed:@"interrupts" cells:@[ @0, @5, @4 ]];
 	[self endNode];
 
 	[self endNode];
