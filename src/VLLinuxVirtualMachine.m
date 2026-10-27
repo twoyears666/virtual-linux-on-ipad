@@ -33,12 +33,14 @@ static const uint64_t VLGPUBase = 0x0A000000;
 static const uint64_t VLBlockBase = 0x0B000000;
 static const uint64_t VLInputBase = 0x0C000000;
 static const uint64_t VLNetBase = 0x0D000000;
+static const uint64_t VLISOBase = 0x0E000000;
 
 // GIC 中断号：SPI 从 32 开始，PPI 27 是 EL1 虚拟定时器
 static const uint32_t VLGPUInterrupt = 34;
 static const uint32_t VLBlockInterrupt = 35;
 static const uint32_t VLInputInterrupt = 36;
 static const uint32_t VLNetInterrupt = 37;
+static const uint32_t VLISOInterrupt = 38;
 static const uint32_t VLPPIVirtualTimer = 27;
 
 /// HVC 调用（PSCI）里的功能号
@@ -67,6 +69,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	VLVirtioInput *_input;
 	VLVirtioNet *_net;
 	VLNetStack *_network;
+	VLVirtioBlock *_iso;
 
 	uint64_t _vcpu;
 	VLHypervisorExit *_exitInfo;
@@ -248,15 +251,26 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		return NO;
 	}
 
+	// 自动安装：preseed 由 VLNetStack 内置的 HTTP 服务提供，所以要先让网络起来。
+	NSMutableString *bootArguments = [NSMutableString stringWithString:
+		@"console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7 panic=1"];
+	BOOL hasPreseed = _configuration.preseedPath.length > 0 &&
+		[NSFileManager.defaultManager fileExistsAtPath:_configuration.preseedPath];
+	if (hasPreseed) {
+		[bootArguments appendString:
+			@" ip=dhcp auto=true priority=critical preseed/url=http://10.0.2.2/preseed.cfg"];
+	}
+
 	NSData *deviceTree = [VLDeviceTree deviceTreeWithMemoryBase:VLGuestMemoryBase
 													memorySize:_guestMemorySize
-												 bootArguments:@"console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7 panic=1"
+												 bootArguments:bootArguments
 													 initrdStart:initrdAddress
 													   initrdEnd:initrdEnd
 														uartBase:VLUARTBase
 														 gicBase:VLGICBase
 														 gpuBase:VLGPUBase
 													   blockBase:VLBlockBase
+														isoBase:VLISOBase
 													   inputBase:VLInputBase
 														 netBase:VLNetBase];
 	if (![_guestMemory writeData:deviceTree atGuestAddress:deviceTreeAddress]) {
@@ -362,6 +376,21 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		[VLStartupLog log:@"没有可用的系统盘镜像，virtio-blk 跳过"];
 	}
 
+	// 安装镜像：ISO 只读挂成第二块 virtio-blk，安装器才能从里面取软件包。
+	NSString *isoPath = _configuration.isoPath;
+	if (isoPath.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:isoPath]) {
+		_iso = [[VLVirtioBlock alloc] initWithBaseAddress:VLISOBase
+											 guestMemory:_guestMemory
+										 interruptNumber:VLISOInterrupt
+								   interruptController:_interruptController
+											 imagePath:isoPath
+											  readOnly:YES];
+		[_deviceBus addDevice:_iso];
+		[VLStartupLog log:@"安装镜像已挂载：%@（只读）", isoPath.lastPathComponent];
+	} else {
+		[VLStartupLog log:@"没有可挂载的安装镜像，virtio-blk（ISO）跳过"];
+	}
+
 	// 触摸屏：详情页里的手指位置通过它送进客户机。
 	_input = [[VLVirtioInput alloc] initWithBaseAddress:VLInputBase
 										   guestMemory:_guestMemory
@@ -372,6 +401,12 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	// 网络：virtio-net 只负责搬帧，ARP/DHCP/DNS/TCP 代理都在 VLNetStack 里。
 	_network = [[VLNetStack alloc] init];
 	[_network start];
+	// 自动安装的 preseed 由网关上的极简 HTTP 服务发给客户机（bootargs 里 preseed/url 指向它）。
+	NSData *preseed = [NSData dataWithContentsOfFile:_configuration.preseedPath];
+	if (preseed.length > 0) {
+		[_network servePreseedContents:preseed];
+		[VLStartupLog log:@"已准备 preseed 自动应答（%lu 字节）", (unsigned long)preseed.length];
+	}
 	_net = [[VLVirtioNet alloc] initWithBaseAddress:VLNetBase
 									   guestMemory:_guestMemory
 								   interruptNumber:VLNetInterrupt
@@ -586,6 +621,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_serial = nil;
 	_gpu = nil;
 	_block = nil;
+	_iso = nil;
 	_input = nil;
 	_net = nil;
 	[_network stop];
