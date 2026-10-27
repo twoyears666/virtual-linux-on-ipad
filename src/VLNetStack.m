@@ -17,6 +17,7 @@
 #define VLNetDNSAddress 0x0A000203       // 10.0.2.3
 #define VLNetBroadcastAddress 0xFFFFFFFF // 255.255.255.255
 #define VLNetPublicDNSAddress 0x08080808  // 8.8.8.8
+#define VLNetSubnetMask 0xFFFFFF00       // 10.0.2.0/24
 
 #define VLNetEthernetHeaderLength 14
 #define VLNetIPv4HeaderLength 20
@@ -24,6 +25,8 @@
 #define VLNetTCPHeaderLength 20
 #define VLNetMaximumSegmentSize 1400
 #define VLNetReceiveWindow 65535
+#define VLNetMaximumUDPFlows 64
+#define VLNetUDPFlowIdleTimeout 60.0
 
 #define VLNetTCPFlagFIN 0x01
 #define VLNetTCPFlagSYN 0x02
@@ -144,6 +147,34 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 
 @end
 
+#pragma mark - 一条 UDP 直连流
+
+/// UDP 没有握手，这里按「客户机源端口 + 目的地址 + 目的端口」把一条会话
+/// 映射到一个宿主机 socket 上，回包再按原路送回去。
+@interface VLNetUDPFlow : NSObject
+
+@property (nonatomic, copy) NSString *key;
+@property (nonatomic, assign) uint16_t guestPort;
+@property (nonatomic, assign) uint32_t destinationAddress;
+@property (nonatomic, assign) uint16_t destinationPort;
+@property (nonatomic, assign) int socketFD;
+@property (nonatomic, assign) CFAbsoluteTime lastActivity;
+@property (nonatomic, strong) dispatch_source_t readSource;
+
+@end
+
+@implementation VLNetUDPFlow
+
+- (instancetype)init {
+	self = [super init];
+	if (self) {
+		_socketFD = -1;
+	}
+	return self;
+}
+
+@end
+
 #pragma mark - VLNetStack
 
 @implementation VLNetStack {
@@ -151,6 +182,7 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 	dispatch_source_t _timer;
 	NSMutableArray<NSData *> *_outbound;
 	NSMutableDictionary<NSString *, VLNetTCPConnection *> *_connections;
+	NSMutableDictionary<NSString *, VLNetUDPFlow *> *_udpFlows;
 	NSMutableDictionary<NSNumber *, NSNumber *> *_pendingQueries;
 	int _dnsSocket;
 	dispatch_source_t _dnsSource;
@@ -163,6 +195,7 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 		_queue = dispatch_queue_create("VirtualLinux.NetStack", DISPATCH_QUEUE_SERIAL);
 		_outbound = [NSMutableArray array];
 		_connections = [NSMutableDictionary dictionary];
+		_udpFlows = [NSMutableDictionary dictionary];
 		_pendingQueries = [NSMutableDictionary dictionary];
 		_dnsSocket = -1;
 		_macAddress = [NSData dataWithBytes:VLNetGuestMAC length:sizeof(VLNetGuestMAC)];
@@ -222,6 +255,9 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 		}
 		for (NSString *key in strongSelf->_connections.allKeys) {
 			[strongSelf closeConnection:strongSelf->_connections[key] reset:NO];
+		}
+		for (NSString *key in strongSelf->_udpFlows.allKeys) {
+			[strongSelf closeUDPFlow:strongSelf->_udpFlows[key]];
 		}
 		[strongSelf->_pendingQueries removeAllObjects];
 		@synchronized (strongSelf) {
@@ -368,7 +404,14 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 	}
 	if (destinationPort == 53 && destination == VLNetDNSAddress) {
 		[self forwardDNSQuery:payload length:payloadLength sourcePort:sourcePort];
+		return;
 	}
+	// 网关和同网段里没有别的机器，广播也不往外发，其余目的地址一律直连转发。
+	if ((destination & VLNetSubnetMask) == (VLNetGatewayAddress & VLNetSubnetMask) ||
+		destination == VLNetBroadcastAddress) {
+		return;
+	}
+	[self forwardUDP:payload length:payloadLength guestPort:sourcePort address:destination port:destinationPort];
 }
 
 #pragma mark - DHCP
@@ -501,6 +544,138 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 			   sourcePort:53
 		  destinationPort:(uint16_t)port.unsignedIntValue
 				  payload:payload];
+	}
+}
+
+#pragma mark - UDP 直连
+
+- (void)forwardUDP:(const uint8_t *)payload
+			length:(NSUInteger)length
+		 guestPort:(uint16_t)guestPort
+		   address:(uint32_t)address
+			  port:(uint16_t)port {
+	VLNetUDPFlow *flow = [self udpFlowForGuestPort:guestPort address:address port:port];
+	if (flow == nil) {
+		return;
+	}
+	flow.lastActivity = CFAbsoluteTimeGetCurrent();
+
+	struct sockaddr_in remote = { 0 };
+	remote.sin_family = AF_INET;
+	remote.sin_port = htons(port);
+	remote.sin_addr.s_addr = htonl(address);
+	if (sendto(flow.socketFD, payload, length, 0, (struct sockaddr *)&remote, sizeof(remote)) < 0) {
+		[VLStartupLog log:@"网络：UDP 发往 %@:%u 失败（%s）",
+			VLIPv4String(address), (unsigned)port, strerror(errno)];
+	}
+}
+
+- (VLNetUDPFlow *)udpFlowForGuestPort:(uint16_t)guestPort
+							  address:(uint32_t)address
+								 port:(uint16_t)port {
+	NSString *key = [NSString stringWithFormat:@"%u-%08x-%u", guestPort, address, port];
+	VLNetUDPFlow *flow = _udpFlows[key];
+	if (flow != nil) {
+		return flow;
+	}
+
+	// 流表满了先关最久没动静的那条，UDP 本来就是可以随时丢弃的。
+	if (_udpFlows.count >= VLNetMaximumUDPFlows) {
+		VLNetUDPFlow *oldest = nil;
+		for (VLNetUDPFlow *candidate in _udpFlows.allValues) {
+			if (oldest == nil || candidate.lastActivity < oldest.lastActivity) {
+				oldest = candidate;
+			}
+		}
+		if (oldest != nil) {
+			[self closeUDPFlow:oldest];
+		}
+	}
+
+	int descriptor = socket(AF_INET, SOCK_DGRAM, 0);
+	if (descriptor < 0) {
+		[VLStartupLog log:@"网络：UDP socket 创建失败（%s）", strerror(errno)];
+		return nil;
+	}
+	fcntl(descriptor, F_SETFL, O_NONBLOCK);
+
+	flow = [[VLNetUDPFlow alloc] init];
+	flow.key = key;
+	flow.guestPort = guestPort;
+	flow.destinationAddress = address;
+	flow.destinationPort = port;
+	flow.socketFD = descriptor;
+	flow.lastActivity = CFAbsoluteTimeGetCurrent();
+	_udpFlows[key] = flow;
+
+	__weak typeof(self) weakSelf = self;
+	__weak VLNetUDPFlow *weakFlow = flow;
+	flow.readSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)descriptor, 0, _queue);
+	dispatch_source_set_event_handler(flow.readSource, ^{
+		typeof(self) strongSelf = weakSelf;
+		VLNetUDPFlow *strongFlow = weakFlow;
+		if (strongSelf == nil || strongFlow == nil) {
+			return;
+		}
+		[strongSelf readUDPFlow:strongFlow];
+	});
+	dispatch_resume(flow.readSource);
+	return flow;
+}
+
+- (void)readUDPFlow:(VLNetUDPFlow *)flow {
+	if (flow.socketFD < 0) {
+		return;
+	}
+	uint8_t buffer[2048];
+	for (;;) {
+		struct sockaddr_in remote = { 0 };
+		socklen_t remoteLength = sizeof(remote);
+		ssize_t count = recvfrom(flow.socketFD, buffer, sizeof(buffer), 0,
+								 (struct sockaddr *)&remote, &remoteLength);
+		if (count == 0) {
+			return;
+		}
+		if (count < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				return;
+			}
+			// 对端回了 ICMP 端口不可达之类，这条流就没用了。
+			[self closeUDPFlow:flow];
+			return;
+		}
+
+		flow.lastActivity = CFAbsoluteTimeGetCurrent();
+		uint16_t sourcePort = flow.destinationPort;
+		if (remote.sin_family == AF_INET) {
+			sourcePort = ntohs(remote.sin_port);
+		}
+		NSData *payload = [NSData dataWithBytes:buffer length:(NSUInteger)count];
+		[self sendUDPFrom:flow.destinationAddress
+					   to:VLNetGuestAddress
+			   sourcePort:sourcePort
+		  destinationPort:flow.guestPort
+				  payload:payload];
+	}
+}
+
+- (void)closeUDPFlow:(VLNetUDPFlow *)flow {
+	if (flow == nil) {
+		return;
+	}
+	if (flow.readSource != nil) {
+		dispatch_source_cancel(flow.readSource);
+		flow.readSource = nil;
+	}
+	if (flow.socketFD >= 0) {
+		close(flow.socketFD);
+		flow.socketFD = -1;
+	}
+	if (flow.key.length > 0) {
+		[_udpFlows removeObjectForKey:flow.key];
 	}
 }
 
@@ -888,6 +1063,15 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 		acknowledgement:connection.receiveNext
 					flags:[entry[@"flags"] unsignedCharValue]
 				  payload:entry[@"payload"]];
+	}
+
+	// UDP 没有关闭握手，长时间没流量就直接回收，免得 socket 一直挂着。
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	for (NSString *key in _udpFlows.allKeys) {
+		VLNetUDPFlow *flow = _udpFlows[key];
+		if (now - flow.lastActivity > VLNetUDPFlowIdleTimeout) {
+			[self closeUDPFlow:flow];
+		}
 	}
 }
 
