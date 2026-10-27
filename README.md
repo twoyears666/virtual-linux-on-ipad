@@ -42,17 +42,18 @@
 
 ### ISO 自动安装（进行中）
 
-置备时解析 ISO9660 安装盘：Debian 系（`install.amd` / `install` / `install.386` 目录）抽出内核与 initrd 到虚拟机目录的 `boot/`，并按 virtio 磁盘（`/dev/vda`）生成 `autoinstall/preseed.cfg` 自动应答；Ubuntu（`casper`）只抽内核与 initrd。其它发行版目前只识别不做自动应答。虚拟化后端接上后即可用它直接跑无交互安装。
+置备时解析 ISO9660 安装盘：Debian 系（`install.amd` / `install` / `install.386` 目录）抽出内核与 initrd 到虚拟机目录的 `boot/`，并按 virtio 磁盘（`/dev/vda`）生成 `autoinstall/preseed.cfg` 自动应答；Ubuntu（`casper`）只抽内核与 initrd。其它发行版目前只识别不做自动应答。虚拟化后端已经能把内核跑起来，接上 virtio-blk 后即可直接跑无交互安装。
 
 
-截图位目前是虚线占位框，等有真实画面再替换。
+虚拟机跑起来后，截图位会换成真实的客户机画面，停止后回到占位框。
 
 界面里的发行版图标来自各发行版官方 logo（经 Wikimedia Commons 转成 512px PNG，见 `Resources/logos/`），仅作发行版识别，商标归各自项目所有。
 
 ## 当前状态
 
 - 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译、多存储位置与冻结、设置页与日志导出、ISO 安装盘解析（抽内核/initrd、Debian 系 preseed）。
-- 待接入：虚拟化后端。`src/VLLinuxVirtualMachine.m` 目前只做能力校验，点「启动」会明确报出缺什么；「运行环境」卡片会显示设备型号、系统版本、越狱环境、Hypervisor 是否存在。
+- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示。
+- 尚未接入：virtio-blk（磁盘）、virtio-net（网络）、virtio-input（键鼠）。所以现在能跑到内核启动日志和画面出现，但还没有根文件系统可挂。
 - 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地生成后放进 `VirtualLinux.app/Frameworks/`。
 
 ## 构建
@@ -103,6 +104,6 @@ make package FINALPACKAGE=1   # 出 rootless deb
 ## 下一步
 
 1. 从 macOS 抽取 Hypervisor 栈，`ldid` 重签后放入 `Frameworks/`
-2. 接 hv 内存映射与 vCPU 循环
-3. virtio-blk / virtio-net / virtio-input，接上 framebuffer 显示
+2. virtio-blk / virtio-net / virtio-input，把根文件系统与输入接上
+3. 画面取帧改成分块增量刷新（现在每次 flush 拷整帧）
 4. 内置或导入 Linux 内核与根文件系统
