@@ -1,23 +1,49 @@
 #import <Foundation/Foundation.h>
 
-extern NSString *const VLLinuxVirtualMachineErrorDomain;
+@class VLVMConfiguration;
 
-/// Linux 客户机。当前只做启动前的能力校验，vCPU / 内存映射 / virtio 引导尚未接入。
+typedef NS_ENUM(NSInteger, VLVirtualMachineState) {
+	VLVirtualMachineStateStopped = 0,
+	VLVirtualMachineStateStarting,
+	VLVirtualMachineStateRunning,
+	VLVirtualMachineStateFailed,
+};
+
+@class VLLinuxVirtualMachine;
+
+@protocol VLLinuxVirtualMachineDelegate <NSObject>
+
+/// 状态变化（主线程回调）。
+- (void)virtualMachine:(VLLinuxVirtualMachine *)machine
+	   didChangeState:(VLVirtualMachineState)state
+			   message:(NSString *)message;
+
+/// 客户机刷新画面（主线程回调）。frame 为 BGRA 8888、行距紧密。
+- (void)virtualMachine:(VLLinuxVirtualMachine *)machine
+	 didUpdateFrameWidth:(uint32_t)width
+				 height:(uint32_t)height
+				   data:(NSData *)data;
+
+/// 串口输出的一行（主线程回调）。
+- (void)virtualMachine:(VLLinuxVirtualMachine *)machine didOutputLine:(NSString *)line;
+
+@end
+
+/// arm64 Linux 虚拟机：负责内存、设备、vCPU 主循环。
+/// 只依赖运行时加载的 Hypervisor.framework，设备全部由本项目自己实现。
 @interface VLLinuxVirtualMachine : NSObject
 
-/// 客户机内核（Linux Image）路径，后续由选中的镜像决定。
-@property (nonatomic, copy) NSString *kernelPath;
+- (instancetype)initWithConfiguration:(VLVMConfiguration *)configuration;
 
-/// 初始根文件系统路径。
-@property (nonatomic, copy) NSString *initrdPath;
+@property (nonatomic, weak) id<VLLinuxVirtualMachineDelegate> delegate;
 
-/// 分配给客户机的内存，单位 MB。
-@property (nonatomic, assign) NSUInteger memorySizeInMegabytes;
+@property (nonatomic, readonly) VLVirtualMachineState state;
+@property (nonatomic, readonly, copy) NSString *statusMessage;
 
-/// 启动客户机。失败时通过 error 返回具体原因。
+/// 启动。会先做能力校验，失败时立即返回 NO 并写 error。
 - (BOOL)startWithError:(NSError **)error;
 
-/// 停止客户机。
+/// 请求停止（异步，状态回到 Stopped 时回调 delegate）。
 - (void)stop;
 
 @end

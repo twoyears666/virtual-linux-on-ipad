@@ -3,11 +3,12 @@
 #import <math.h>
 
 #import "VLDashedPlaceholderView.h"
+#import "VLDisplayView.h"
 #import "VLHostCapabilities.h"
 #import "VLLinuxVirtualMachine.h"
 #import "VLStartupLog.h"
 
-@interface VLDetailViewController ()
+@interface VLDetailViewController () <VLLinuxVirtualMachineDelegate>
 
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *stackView;
@@ -18,6 +19,9 @@
 @property (nonatomic, strong) NSMutableArray<UILabel *> *diskValueLabels;
 @property (nonatomic, strong) UIButton *resolutionButton;
 @property (nonatomic, strong) UILabel *statusLabel;
+
+@property (nonatomic, strong) VLLinuxVirtualMachine *virtualMachine;
+@property (nonatomic, strong) VLDisplayView *displayView;
 
 @end
 
@@ -56,12 +60,20 @@
 }
 
 - (void)setConfiguration:(VLVMConfiguration *)configuration {
+	// 换到另一台机器时，先把上一台的 vCPU 停掉，避免两层画面同时刷新。
+	if (_configuration != configuration && [self isMachineActive]) {
+		[self.virtualMachine stop];
+	}
 	_configuration = configuration;
 	self.title = configuration != nil ? configuration.name : @"虚拟机";
 
 	if (self.isViewLoaded) {
 		[self rebuildContent];
 	}
+}
+
+- (void)dealloc {
+	[_virtualMachine stop];
 }
 
 - (void)rebuildContent {
@@ -91,26 +103,30 @@
 		[self.stackView addArrangedSubview:[self frozenBannerView]];
 	}
 
-	// 截图占位：不是必须的图，先画虚线框标注清楚位置；点按即启动。
-	VLDashedPlaceholderView *placeholder = [[VLDashedPlaceholderView alloc] init];
-	placeholder.translatesAutoresizingMaskIntoConstraints = NO;
-	placeholder.text = frozen
-		? @"已冻结\n存放位置不可用，恢复目录后自动解冻"
-		: [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
-	__weak typeof(self) weakSelf = self;
-	if (!frozen) {
-		placeholder.onTap = ^{
-			[weakSelf startTapped];
-		};
+	// 客户机跑起来就换成真实画面（4:3），没跑时用虚线框占位，点按即启动。
+	if ([self isMachineActive]) {
+		[self.stackView addArrangedSubview:[self displayAreaView]];
+	} else {
+		VLDashedPlaceholderView *placeholder = [[VLDashedPlaceholderView alloc] init];
+		placeholder.translatesAutoresizingMaskIntoConstraints = NO;
+		placeholder.text = frozen
+			? @"已冻结\n存放位置不可用，恢复目录后自动解冻"
+			: [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
+		__weak typeof(self) weakSelf = self;
+		if (!frozen) {
+			placeholder.onTap = ^{
+				[weakSelf startTapped];
+			};
+		}
+		// 4:3（iPad 常见比例），宽度撑满、高度按比例算。
+		[placeholder.heightAnchor constraintEqualToAnchor:placeholder.widthAnchor multiplier:0.75].active = YES;
+		if (frozen) {
+			placeholder.alpha = 0.55;
+			placeholder.userInteractionEnabled = NO;
+		}
+		[self.stackView addArrangedSubview:placeholder];
 	}
-	// 4:3（iPad 常见比例），宽度撑满、高度按比例算。
-	[placeholder.heightAnchor constraintEqualToAnchor:placeholder.widthAnchor multiplier:0.75].active = YES;
-	if (frozen) {
-		placeholder.alpha = 0.55;
-		placeholder.userInteractionEnabled = NO;
-	}
-	[self.stackView addArrangedSubview:placeholder];
-	[VLStartupLog log:@"详情界面 截图占位完成"];
+	[VLStartupLog log:@"详情界面 画面区域完成"];
 
 	// 基本信息
 	self.nameField = [self textFieldWithPlaceholder:@"虚拟机名称"
@@ -272,13 +288,14 @@
 	[self.stackView addArrangedSubview:[self cardWithTitle:@"运行环境" rows:@[ environmentLabel ]]];
 	[VLStartupLog log:@"详情界面 运行环境卡片完成"];
 
-	// 启动
+	// 启动 / 停止
+	BOOL machineActive = [self isMachineActive];
 	UIButton *startButton = [UIButton buttonWithType:UIButtonTypeSystem];
 	startButton.translatesAutoresizingMaskIntoConstraints = NO;
-	[startButton setTitle:@"启动虚拟机" forState:UIControlStateNormal];
+	[startButton setTitle:(machineActive ? @"停止虚拟机" : @"启动虚拟机") forState:UIControlStateNormal];
 	startButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
 	[startButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-	startButton.backgroundColor = self.view.tintColor;
+	startButton.backgroundColor = machineActive ? UIColor.systemRedColor : self.view.tintColor;
 	startButton.layer.cornerRadius = 12.0;
 	[startButton addTarget:self action:@selector(startTapped) forControlEvents:UIControlEventTouchUpInside];
 	[startButton.heightAnchor constraintEqualToConstant:50.0].active = YES;
@@ -288,7 +305,7 @@
 	self.statusLabel.numberOfLines = 0;
 	self.statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	self.statusLabel.textColor = UIColor.secondaryLabelColor;
-	self.statusLabel.text = @"阶段：界面已就绪，虚拟化后端待接入";
+	self.statusLabel.text = [self machineStatusText];
 	[self.stackView addArrangedSubview:self.statusLabel];
 
 	[VLStartupLog log:@"详情界面 重建完成"];
@@ -749,27 +766,110 @@
 	return banner;
 }
 
+#pragma mark - 虚拟机状态
+
+- (BOOL)isMachineActive {
+	VLVirtualMachineState state =
+		self.virtualMachine != nil ? self.virtualMachine.state : VLVirtualMachineStateStopped;
+	return state == VLVirtualMachineStateStarting || state == VLVirtualMachineStateRunning;
+}
+
+- (NSString *)machineStatusText {
+	NSString *message = self.virtualMachine.statusMessage;
+	return message.length > 0 ? message : @"未运行";
+}
+
+/// 画面区：复用同一个 VLDisplayView，重建界面时不会丢掉最后一帧。
+- (UIView *)displayAreaView {
+	VLDisplayView *display = self.displayView;
+	if (display == nil) {
+		display = [[VLDisplayView alloc] init];
+		self.displayView = display;
+	}
+	// 有画面时状态文字会盖在图上，只在没画面时更新。
+	if (!display.hasFrame) {
+		display.statusText = [self machineStatusText];
+	}
+
+	UIView *container = [[UIView alloc] init];
+	container.translatesAutoresizingMaskIntoConstraints = NO;
+	display.translatesAutoresizingMaskIntoConstraints = NO;
+	[container addSubview:display];
+	[NSLayoutConstraint activateConstraints:@[
+		[display.topAnchor constraintEqualToAnchor:container.topAnchor],
+		[display.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+		[display.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+		[display.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
+		[container.heightAnchor constraintEqualToAnchor:container.widthAnchor multiplier:0.75],
+	]];
+	return container;
+}
+
 #pragma mark - 启动
 
 - (void)startTapped {
+	if ([self isMachineActive]) {
+		[self.virtualMachine stop];
+		self.statusLabel.text = @"正在停止…";
+		return;
+	}
+
 	if (!self.configuration.isStorageAvailable) {
 		self.statusLabel.text = @"存储不可用：虚拟机已冻结，恢复存放目录后才能启动";
 		return;
 	}
 
-	VLLinuxVirtualMachine *machine = [[VLLinuxVirtualMachine alloc] init];
-	machine.kernelPath = self.configuration.kernelPath;
-	machine.initrdPath = self.configuration.initrdPath;
-	machine.memorySizeInMegabytes = self.configuration.memoryMB;
+	if (self.virtualMachine == nil) {
+		self.virtualMachine = [[VLLinuxVirtualMachine alloc] initWithConfiguration:self.configuration];
+		self.virtualMachine.delegate = self;
+	}
 
 	NSError *error = nil;
-	if ([machine startWithError:&error]) {
-		self.statusLabel.text = @"阶段：客户机启动中";
+	if (![self.virtualMachine startWithError:&error]) {
+		self.statusLabel.text = [NSString stringWithFormat:@"启动被拒绝（错误码 %ld）：%@",
+								 (long)error.code, error.localizedDescription];
 		return;
 	}
 
-	self.statusLabel.text = [NSString stringWithFormat:@"启动被拒绝（错误码 %ld）：%@",
-							 (long)error.code, error.localizedDescription];
+	[self rebuildContent];
+}
+
+#pragma mark - VLLinuxVirtualMachineDelegate
+
+- (void)virtualMachine:(VLLinuxVirtualMachine *)machine
+	   didChangeState:(VLVirtualMachineState)state
+			   message:(NSString *)message {
+	if (machine != self.virtualMachine) {
+		return;
+	}
+	if (state == VLVirtualMachineStateStopped || state == VLVirtualMachineStateFailed) {
+		[self.displayView clearFrame];
+	}
+	[self rebuildContent];
+}
+
+- (void)virtualMachine:(VLLinuxVirtualMachine *)machine
+	didUpdateFrameWidth:(uint32_t)width
+				 height:(uint32_t)height
+				   data:(NSData *)data {
+	if (machine != self.virtualMachine) {
+		return;
+	}
+	if (self.displayView.superview == nil) {
+		[self rebuildContent];
+	}
+	[self.displayView updateWithWidth:width height:height frame:data];
+}
+
+- (void)virtualMachine:(VLLinuxVirtualMachine *)machine didOutputLine:(NSString *)line {
+	if (machine != self.virtualMachine) {
+		return;
+	}
+	NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
+	if (trimmed.length == 0 || self.statusLabel == nil) {
+		return;
+	}
+	self.statusLabel.text = [NSString stringWithFormat:@"控制台：%@", trimmed];
 }
 
 @end
