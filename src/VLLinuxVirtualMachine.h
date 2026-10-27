@@ -46,4 +46,9 @@ typedef NS_ENUM(NSInteger, VLVirtualMachineState) {
 /// 请求停止（异步，状态回到 Stopped 时回调 delegate）。
 - (void)stop;
 
+/// 把 App 里的触摸位置（0 – 1，左上角原点）转成客户机触摸屏事件。
+- (void)sendTouchBeganAtNormalizedX:(double)x y:(double)y;
+- (void)sendTouchMovedToNormalizedX:(double)x y:(double)y;
+- (void)sendTouchEnded;
+
 @end

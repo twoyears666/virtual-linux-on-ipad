@@ -133,6 +133,8 @@ static void VLWriteLE64(uint8_t *bytes, uint64_t value) {
 	uint32_t _framebufferWidth;
 	uint32_t _framebufferHeight;
 	uint8_t *_framebuffer;
+	BOOL _framebufferDirty;
+	CFAbsoluteTime _lastPublishTime;
 }
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress
@@ -613,6 +615,8 @@ static void VLWriteLE64(uint8_t *bytes, uint64_t value) {
 	_framebuffer = framebuffer;
 	_framebufferWidth = width;
 	_framebufferHeight = height;
+	_framebufferDirty = YES;
+	_lastPublishTime = 0;
 }
 
 - (void)copyResource:(VLVirtioGPUResource *)resource
@@ -659,6 +663,7 @@ static void VLWriteLE64(uint8_t *bytes, uint64_t value) {
 		}
 		size_t destinationOffset = ((size_t)sourceY * _framebufferWidth + clampedX) * 4;
 		memcpy(_framebuffer + destinationOffset, source, destinationWidth);
+		_framebufferDirty = YES;
 	}
 }
 
@@ -666,6 +671,20 @@ static void VLWriteLE64(uint8_t *bytes, uint64_t value) {
 	if (!_scanoutEnabled || _framebuffer == NULL || self.frameHandler == nil) {
 		return;
 	}
+	// 画面没变就不重复整幅拷贝；限帧时也先攒着，等下一次 FLUSH 再送。
+	if (!_framebufferDirty) {
+		return;
+	}
+	uint32_t limit = self.maximumFramesPerSecond;
+	if (limit > 0) {
+		CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+		if (_lastPublishTime > 0 && (now - _lastPublishTime) < 1.0 / (double)limit) {
+			return;
+		}
+		_lastPublishTime = now;
+	}
+	_framebufferDirty = NO;
+
 	size_t byteCount = (size_t)_framebufferWidth * _framebufferHeight * 4;
 	NSData *frame = [NSData dataWithBytes:_framebuffer length:byteCount];
 	self.frameHandler(_framebufferWidth, _framebufferHeight, frame);

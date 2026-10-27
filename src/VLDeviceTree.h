@@ -13,6 +13,8 @@
 							 initrdEnd:(uint64_t)initrdEnd
 							  uartBase:(uint64_t)uartBase
 							   gicBase:(uint64_t)gicBase
-							   gpuBase:(uint64_t)gpuBase;
+							   gpuBase:(uint64_t)gpuBase
+							 blockBase:(uint64_t)blockBase
+							 inputBase:(uint64_t)inputBase;
 
 @end

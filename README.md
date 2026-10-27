@@ -17,7 +17,8 @@
 
 ## 存放位置
 
-- 默认位置是 App 文档目录下的 `VirtualMachines`；设置页可再登记任意文件夹（例如外接磁盘），用 security-scoped 书签持久化，重启后自动恢复访问
+- 默认位置是 `/var/mobile/Media/VirtualMachines`（越狱后 App 不受沙盒限制，卸载重装、换签名、刷机都不会把手里的虚拟机带走）；目录建不出来时退回 App 文档目录下的 `VirtualMachines`
+- 设置页可再登记任意文件夹（例如外接磁盘），用 security-scoped 书签持久化，重启后自动恢复访问
 - 多个位置共存，新建虚拟机时可在「存储 → 存放位置」里选；已有虚拟机不迁移
 - 位置目录不在了（外接盘拔出、目录被删）时，它下面的虚拟机在列表和详情页标为「已冻结」：不能启动，但配置仍可查看，目录恢复后自动解冻
 
@@ -36,8 +37,8 @@
 ## 当前状态
 
 - 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译、多存储位置与冻结、设置页与日志导出、ISO 安装盘解析（抽内核/initrd、Debian 系 preseed）。
-- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示。
-- 尚未接入：virtio-blk（磁盘）、virtio-net（网络）、virtio-input（键鼠）。所以现在能跑到内核启动日志和画面出现，但还没有根文件系统可挂。
+- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示；virtio-blk 挂载系统盘镜像；virtio-input 单点触摸屏，详情页里的手指位置直接送进客户机。
+- 尚未接入：virtio-net（网络）。
 - 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地生成后放进 `VirtualLinux.app/Frameworks/`。
 
 ## 构建
@@ -47,6 +48,27 @@
 ```sh
 make package FINALPACKAGE=1   # 出 rootless deb
 ```
+
+Hypervisor.framework 要自己从 macOS 抽取（Apple 没给 iPadOS 的 SDK），在 arm64 Mac 上：
+
+```sh
+# 1. 拷出二进制（同一版本号内的 macOS 与 iPadOS 15/16 内核 ABI 一致）
+mkdir -p VirtualLinux.app/Frameworks/Hypervisor.framework
+cp /System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor \
+   VirtualLinux.app/Frameworks/Hypervisor.framework/Hypervisor
+
+# 2. 让 App 能找到它，并补一个最小 Info.plist
+plutil -create xml1 VirtualLinux.app/Frameworks/Hypervisor.framework/Info.plist
+plutil -insert CFBundleIdentifier -string com.apple.Hypervisor \
+       VirtualLinux.app/Frameworks/Hypervisor.framework/Info.plist
+plutil -insert CFBundleExecutable -string Hypervisor \
+       VirtualLinux.app/Frameworks/Hypervisor.framework/Info.plist
+
+# 3. 重签成设备可加载的形态（rootless 越狱用 ldid 即可）
+ldid -S VirtualLinux.app/Frameworks/Hypervisor.framework/Hypervisor
+```
+
+App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` 的顺序查找，找不到就在状态里报「Hypervisor 不可用」，不会直接闪退。
 
 ## CI
 
@@ -88,6 +110,6 @@ make package FINALPACKAGE=1   # 出 rootless deb
 ## 下一步
 
 1. 从 macOS 抽取 Hypervisor 栈，`ldid` 重签后放入 `Frameworks/`
-2. virtio-blk / virtio-net / virtio-input，把根文件系统与输入接上
-3. 画面取帧改成分块增量刷新（现在每次 flush 拷整帧）
-4. 内置或导入 Linux 内核与根文件系统
+2. virtio-net，把网络接上
+3. 内置或导入可启动的内核与根文件系统（virtio-blk 已能挂载镜像）
+4. 真机验证 GIC 中断注入、EL1 虚拟定时器与 virtio 队列收发
