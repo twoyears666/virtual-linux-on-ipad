@@ -52,6 +52,24 @@ static const uint32_t VLPPIVirtualTimer = 27;
 #define VL_PSCI_SYSTEM_OFF 0x84000008ULL
 #define VL_PSCI_SYSTEM_RESET 0x84000009ULL
 #define VL_PSCI_RET_NOT_SUPPORTED ((uint64_t)-1)
+#define VL_PSCI_RET_INVALID_PARAMETERS ((uint64_t)-2)
+#define VL_PSCI_RET_ALREADY_ON ((uint64_t)-4)
+
+/// 最多支持多少个 vCPU；设备树和 GIC 的 CPU 接口窗口都按这个上限预留。
+#define VLMaximumCPUs 8
+
+/// 一个 vCPU 的上下文。HVF 要求 hv_vcpu_create / hv_vcpu_run / hv_vcpu_destroy
+/// 都在同一个线程上调用，所以句柄只能存在跑它的那个线程里，这里放的是跨线程可见的状态。
+typedef struct {
+	uint64_t vcpu;
+	VLHypervisorExit *exitInfo;
+	BOOL created;
+	BOOL startRequested;
+	BOOL finished;
+	uint64_t startPC;
+	uint64_t startContextID;
+} VLVCPUSlot;
+
 
 static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return (value + alignment - 1) & ~(alignment - 1);
@@ -72,10 +90,14 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	VLNetStack *_network;
 	VLVirtioBlock *_iso;
 
-	uint64_t _vcpu;
-	VLHypervisorExit *_exitInfo;
 	NSUInteger _exitCount;
 	BOOL _inputServicePending;
+
+	/// 每个 vCPU 一份。0 号核跑在 runVirtualMachine 的线程上，其余各自一个线程。
+	VLVCPUSlot _slots[VLMaximumCPUs];
+	NSUInteger _cpuCount;
+	NSCondition *_startCondition;
+	NSRecursiveLock *_deviceLock;
 
 	BOOL _stopRequested;
 	BOOL _framePending;
@@ -92,6 +114,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		_statusMessage = @"未运行";
 		_displayWidth = 1024;
 		_displayHeight = 768;
+		_startCondition = [[NSCondition alloc] init];
+		_deviceLock = [[NSRecursiveLock alloc] init];
 	}
 	return self;
 }
@@ -129,11 +153,16 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_stopRequested = NO;
 	_exitCount = 0;
 	_inputServicePending = NO;
+	[_startCondition lock];
+	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
+		memset(&_slots[index], 0, sizeof(VLVCPUSlot));
+	}
+	[_startCondition unlock];
 	[self parseDisplayResolution];
 	[self reportState:VLVirtualMachineStateStarting message:@"创建虚拟硬件…"];
 
 	NSThread *thread = [[NSThread alloc] initWithTarget:self selector:@selector(runVirtualMachine) object:nil];
-	thread.name = @"VirtualLinux.VCPU";
+	thread.name = @"VirtualLinux.vCPU0";
 	thread.qualityOfService = NSQualityOfServiceUserInteractive;
 	[thread start];
 	return YES;
@@ -141,11 +170,33 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 - (void)stop {
 	_stopRequested = YES;
-	if (_vcpu != 0) {
-		uint64_t vcpu = _vcpu;
-		[_hypervisor exitVCPUs:&vcpu count:1];
-	}
+	[self exitAllProcessors];
 	[self reportState:VLVirtualMachineStateStopped message:@"已停止"];
+}
+
+/// 让所有已创建的 vCPU 立刻从 hv_vcpu_run 里出来，并把等开机的线程放掉。
+- (void)exitAllProcessors {
+	uint64_t handles[VLMaximumCPUs];
+	uint32_t count = 0;
+	[_startCondition lock];
+	for (NSUInteger index = 0; index < _cpuCount; index++) {
+		// 只对已经放出去的核调 exit；还没开机的核靠上面的 broadcast 唤醒后自然退出。
+		if (_slots[index].created && _slots[index].startRequested && _slots[index].vcpu != 0) {
+			handles[count++] = _slots[index].vcpu;
+		}
+	}
+	[_startCondition broadcast];
+	[_startCondition unlock];
+
+	if (count > 0) {
+		[_hypervisor exitVCPUs:handles count:count];
+	}
+}
+
+/// 任意一个核出了没法处理的问题：整台机停下来，否则 0 号核会一直等其它核。
+- (void)haltAllProcessors {
+	_stopRequested = YES;
+	[self exitAllProcessors];
 }
 
 - (BOOL)isStopRequested {
@@ -185,11 +236,113 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		}
 
 		[self reportState:VLVirtualMachineStateRunning message:@"客户机运行中"];
-		[self runProcessorLoop];
+		// 0 号核在 setup 里已经标成开机状态；其余核先等在这儿，客户机发 PSCI CPU_ON 才动。
+		for (NSUInteger index = 1; index < _cpuCount; index++) {
+			NSThread *thread = [[NSThread alloc] initWithTarget:self
+													   selector:@selector(runProcessor:)
+														 object:@(index)];
+			thread.name = [NSString stringWithFormat:@"VirtualLinux.vCPU%lu", (unsigned long)index];
+			thread.qualityOfService = NSQualityOfServiceUserInteractive;
+			[thread start];
+		}
+		[self runProcessor:@0];
+		[self waitForProcessors];
 		[self teardown];
 		if (_state != VLVirtualMachineStateFailed) {
 			[self reportState:VLVirtualMachineStateStopped message:@"已停止"];
 		}
+	}
+}
+
+/// 一个 vCPU 的全部一生：建 vCPU → 等开机 → 跑退出循环 → 销毁。必须全在同一个线程里做，
+/// 这是 Hypervisor.framework 的硬性要求。
+- (void)runProcessor:(NSNumber *)indexBox {
+	NSUInteger index = indexBox.unsignedIntegerValue;
+	@autoreleasepool {
+		VLSetProcessorIndexForCurrentThread((uint32_t)index);
+
+		uint64_t vcpu = 0;
+		VLHypervisorExit *exitInfo = NULL;
+		int32_t result = [_hypervisor createVCPU:&vcpu exitInfo:&exitInfo];
+		if (result != 0) {
+			[VLStartupLog log:@"vCPU %lu 创建失败（0x%x）", (unsigned long)index, (unsigned)result];
+			[self finishProcessor:index];
+			return;
+		}
+
+		[_startCondition lock];
+		_slots[index].vcpu = vcpu;
+		_slots[index].exitInfo = exitInfo;
+		_slots[index].created = YES;
+		[_startCondition broadcast];
+		while (!_slots[index].startRequested && !_stopRequested) {
+			[_startCondition wait];
+		}
+		BOOL shouldStart = _slots[index].startRequested && !_stopRequested;
+		uint64_t startPC = _slots[index].startPC;
+		uint64_t startContextID = _slots[index].startContextID;
+		[_startCondition unlock];
+
+		if (shouldStart) {
+			[self configureStartupRegistersForCPU:index
+											 vcpu:vcpu
+											   pc:startPC
+										contextID:startContextID];
+			[self runProcessorLoopForCPU:index vcpu:vcpu exitInfo:exitInfo];
+		}
+
+		[_hypervisor destroyVCPU:vcpu];
+		[self finishProcessor:index];
+	}
+}
+
+- (void)finishProcessor:(NSUInteger)index {
+	[_startCondition lock];
+	_slots[index].vcpu = 0;
+	_slots[index].created = NO;
+	_slots[index].finished = YES;
+	[_startCondition broadcast];
+	[_startCondition unlock];
+}
+
+- (void)waitForProcessors {
+	[_startCondition lock];
+	for (;;) {
+		BOOL allFinished = YES;
+		for (NSUInteger index = 0; index < _cpuCount; index++) {
+			if (!_slots[index].finished) {
+				allFinished = NO;
+				break;
+			}
+		}
+		if (allFinished) {
+			break;
+		}
+		[_startCondition wait];
+	}
+	[_startCondition unlock];
+}
+
+/// arm64 Linux 入口：PC 指向入口，x0 = 参数（0 号核是设备树地址，其余核是 PSCI 给的 context id）。
+- (void)configureStartupRegistersForCPU:(NSUInteger)index
+								   vcpu:(uint64_t)vcpu
+									 pc:(uint64_t)pc
+							  contextID:(uint64_t)contextID {
+	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc forVCPU:vcpu];
+	[_hypervisor setRegister:0 value:contextID forVCPU:vcpu];
+	[_hypervisor setRegister:1 value:0 forVCPU:vcpu];
+	[_hypervisor setRegister:2 value:0 forVCPU:vcpu];
+	[_hypervisor setRegister:3 value:0 forVCPU:vcpu];
+	// EL1h，屏蔽 D/A/I/F
+	[_hypervisor setRegister:VLHypervisorRegisterCPSR value:0x3C5 forVCPU:vcpu];
+
+	if (index == 0) {
+		[VLStartupLog log:@"vCPU 0 就绪：PC=0x%llx 内存=%llu MB",
+		 (unsigned long long)pc,
+		 (unsigned long long)(_guestMemorySize / (1024ULL * 1024ULL))];
+	} else {
+		[VLStartupLog log:@"vCPU %lu 就绪：PC=0x%llx context=0x%llx",
+		 (unsigned long)index, (unsigned long long)pc, (unsigned long long)contextID];
 	}
 }
 
@@ -211,6 +364,14 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 - (BOOL)setupEnvironmentWithError:(NSError **)error {
 	_guestMemorySize = (uint64_t)MAX((NSUInteger)_configuration.memoryMB, (NSUInteger)128) * 1024ULL * 1024ULL;
+
+	// 界面里的「CPU 核心数」在这里真正生效：0 号核直接开机，其余核等 PSCI CPU_ON。
+	NSUInteger requestedCores = MAX((NSUInteger)1, _configuration.cpuCores);
+	_cpuCount = MIN(requestedCores, (NSUInteger)VLMaximumCPUs);
+	if (_cpuCount != requestedCores) {
+		[VLStartupLog log:@"配置 %lu 核，实际按 %lu 核启动（上限 %d 核）",
+		 (unsigned long)requestedCores, (unsigned long)_cpuCount, VLMaximumCPUs];
+	}
 
 	int32_t result = [_hypervisor createVirtualMachine];
 	if (result != 0) {
@@ -307,6 +468,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 												 bootArguments:bootArguments
 													 initrdStart:initrdAddress
 													   initrdEnd:initrdEnd
+													   cpuCount:_cpuCount
 														uartBase:VLUARTBase
 														 gicBase:VLGICBase
 														 gpuBase:VLGPUBase
@@ -326,24 +488,17 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	[self setupDevices];
 
-	result = [_hypervisor createVCPU:&_vcpu exitInfo:&_exitInfo];
-	if (result != 0) {
-		if (error != NULL) {
-			*error = [self errorWithMessage:[NSString stringWithFormat:@"hv_vcpu_create 失败（0x%x）", (unsigned)result]];
-		}
-		return NO;
-	}
+	// 0 号核：PC = 内核装载地址，x0 = 设备树地址。vCPU 句柄要等它自己的线程去建，
+	// 这里只把「开机目标和参数」记下来。
+	[_startCondition lock];
+	_slots[0].startPC = kernelAddress;
+	_slots[0].startContextID = deviceTreeAddress;
+	_slots[0].startRequested = YES;
+	[_startCondition broadcast];
+	[_startCondition unlock];
 
-	// arm64 Linux 入口：PC = 内核装载地址，x0 = 设备树地址。
-	[_hypervisor setRegister:VLHypervisorRegisterPC value:kernelAddress forVCPU:_vcpu];
-	[_hypervisor setRegister:0 value:deviceTreeAddress forVCPU:_vcpu];
-	[_hypervisor setRegister:1 value:0 forVCPU:_vcpu];
-	[_hypervisor setRegister:2 value:0 forVCPU:_vcpu];
-	[_hypervisor setRegister:3 value:0 forVCPU:_vcpu];
-	// EL1h，屏蔽 D/A/I/F
-	[_hypervisor setRegister:VLHypervisorRegisterCPSR value:0x3C5 forVCPU:_vcpu];
-
-	[VLStartupLog log:@"vCPU 就绪：PC=0x%llx DTB=0x%llx 内存=%llu MB",
+	[VLStartupLog log:@"%lu 核启动：内核 0x%llx，设备树 0x%llx，内存 %llu MB",
+	 (unsigned long)_cpuCount,
 	 (unsigned long long)kernelAddress, (unsigned long long)deviceTreeAddress,
 	 (unsigned long long)(_guestMemorySize / (1024ULL * 1024ULL))];
 	return YES;
@@ -352,12 +507,19 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 - (void)setupDevices {
 	_deviceBus = [[VLDeviceBus alloc] init];
 
-	_interruptController = [[VLInterruptController alloc] initWithBaseAddress:VLGICBase];
+	_interruptController = [[VLInterruptController alloc] initWithBaseAddress:VLGICBase
+																	cpuCount:_cpuCount];
 	__weak typeof(self) weakSelf = self;
-	_interruptController.irqLineHandler = ^(BOOL asserted) {
+	_interruptController.irqLineHandler = ^(uint32_t cpuIndex, BOOL asserted) {
 		typeof(self) strongSelf = weakSelf;
-		if (strongSelf != nil && strongSelf->_vcpu != 0) {
-			[strongSelf->_hypervisor setPendingIRQ:asserted forVCPU:strongSelf->_vcpu];
+		if (strongSelf == nil) {
+			return;
+		}
+		[strongSelf->_startCondition lock];
+		uint64_t vcpu = cpuIndex < strongSelf->_cpuCount ? strongSelf->_slots[cpuIndex].vcpu : 0;
+		[strongSelf->_startCondition unlock];
+		if (vcpu != 0) {
+			[strongSelf->_hypervisor setPendingIRQ:asserted forVCPU:vcpu];
 		}
 	};
 	[_deviceBus addDevice:_interruptController];
@@ -456,28 +618,30 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	[_deviceBus addDevice:_net];
 }
 
-- (void)runProcessorLoop {
+- (void)runProcessorLoopForCPU:(NSUInteger)cpuIndex
+						  vcpu:(uint64_t)vcpu
+					  exitInfo:(VLHypervisorExit *)exitInfo {
 	while (![self isStopRequested]) {
 		// 每次退出都可能产生临时对象（画面数据），按迭代回收，避免长期运行内存一直涨。
 		@autoreleasepool {
-			int32_t result = [_hypervisor runVCPU:_vcpu];
+			int32_t result = [_hypervisor runVCPU:vcpu];
 			if (result != 0) {
 				[self reportFailure:[NSString stringWithFormat:@"hv_vcpu_run 失败（0x%x）", (unsigned)result]];
 				return;
 			}
-			if (_exitInfo == NULL) {
+			if (exitInfo == NULL) {
 				[self reportFailure:@"Hypervisor 没有返回退出信息"];
 				return;
 			}
 
-			uint32_t reason = _exitInfo->reason;
+			uint32_t reason = exitInfo->reason;
 			// 第一次退出最能说明底层通不通，单独记一条，省得靠猜。
-			if (_exitCount == 0) {
+			if (cpuIndex == 0 && _exitCount == 0) {
 				_exitCount = 1;
 				uint64_t pc = 0;
-				[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:_vcpu];
+				[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
 				uint64_t syndrome = reason == VLHypervisorExitReasonException
-					? _exitInfo->info.exception.syndrome
+					? exitInfo->info.exception.syndrome
 					: 0;
 				[VLStartupLog log:@"vCPU 首次退出：原因=%u PC=0x%llx ESR=0x%llx",
 				 reason, (unsigned long long)pc, (unsigned long long)syndrome];
@@ -485,19 +649,22 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 			if (reason == VLHypervisorExitReasonCanceled) {
 				continue;
 			}
-			if (_inputServicePending) {
-				_inputServicePending = NO;
-				[_input servicePendingEvents];
+			// 输入和网络只在 0 号核上服务，多核时不会重复搬运同一批帧。
+			if (cpuIndex == 0) {
+				if (_inputServicePending) {
+					_inputServicePending = NO;
+					[_input servicePendingEvents];
+				}
+				// 网络栈攒下的下行帧要及时交给客户机，否则 TCP 会一直等。
+				[_net serviceReceive];
 			}
-			// 网络栈攒下的下行帧要及时交给客户机，否则 TCP 会一直等。
-			[_net serviceReceive];
 			if (reason == VLHypervisorExitReasonVTimer) {
-				// 客户机虚拟定时器到期：把 PPI 27 挂到 GIC 上。
+				// 客户机虚拟定时器到期：把 PPI 27 挂到本核的 GIC 上（PPI 是核私有的）。
 				[_interruptController setIRQPending:VLPPIVirtualTimer];
 				continue;
 			}
 			if (reason == VLHypervisorExitReasonException) {
-				if (![self handleException]) {
+				if (![self handleExceptionForCPU:cpuIndex vcpu:vcpu exitInfo:exitInfo]) {
 					return;
 				}
 				continue;
@@ -511,28 +678,30 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 #pragma mark - 异常处理
 
-- (BOOL)handleException {
-	uint64_t syndrome = _exitInfo->info.exception.syndrome;
-	uint64_t address = _exitInfo->info.exception.virtualAddress;
+- (BOOL)handleExceptionForCPU:(NSUInteger)cpuIndex
+						 vcpu:(uint64_t)vcpu
+					 exitInfo:(VLHypervisorExit *)exitInfo {
+	uint64_t syndrome = exitInfo->info.exception.syndrome;
+	uint64_t address = exitInfo->info.exception.virtualAddress;
 	uint32_t exceptionClass = (uint32_t)((syndrome >> 26) & 0x3F);
 
 	if (exceptionClass == 0x24 || exceptionClass == 0x25) {
-		return [self handleDataAbortSyndrome:syndrome address:address];
+		return [self handleDataAbortSyndrome:syndrome address:address vcpu:vcpu];
 	}
 	if (exceptionClass == 0x01) {
 		// WFI/WFE 陷入：客户机在等中断。让出一点 CPU 再往前走，避免空转刷满。
-		if (_inputServicePending) {
+		if (cpuIndex == 0 && _inputServicePending) {
 			_inputServicePending = NO;
 			[_input servicePendingEvents];
 		}
 		usleep(500);
 		uint64_t pc = 0;
-		[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:_vcpu];
-		[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:_vcpu];
+		[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+		[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 		return YES;
 	}
 	if (exceptionClass == 0x16) {
-		return [self handleHypervisorCall];
+		return [self handleHypervisorCallForCPU:cpuIndex vcpu:vcpu];
 	}
 
 	[self reportFailure:[NSString stringWithFormat:@"未处理的异常 EC=0x%x ESR=0x%llx",
@@ -540,7 +709,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return NO;
 }
 
-- (BOOL)handleDataAbortSyndrome:(uint64_t)syndrome address:(uint64_t)address {
+- (BOOL)handleDataAbortSyndrome:(uint64_t)syndrome address:(uint64_t)address vcpu:(uint64_t)vcpu {
 	BOOL instructionValid = ((syndrome >> 24) & 0x1) != 0;
 	if (!instructionValid) {
 		[self reportFailure:[NSString stringWithFormat:@"MMIO 访问无法解码 0x%llx", (unsigned long long)address]];
@@ -552,18 +721,21 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	BOOL isWrite = ((syndrome >> 6) & 0x1) != 0;
 	uint32_t registerIndex = (uint32_t)((syndrome >> 16) & 0x1F);
 
+	// 多个核可能同时触发 MMIO 异常，设备状态不是线程安全的，串行进出。
+	[_deviceLock lock];
 	BOOL handled = NO;
 	if (isWrite) {
 		uint64_t value = 0;
-		[_hypervisor getRegister:registerIndex value:&value forVCPU:_vcpu];
+		[_hypervisor getRegister:registerIndex value:&value forVCPU:vcpu];
 		handled = [self writeValue:value width:width address:address];
 	} else {
 		uint64_t value = 0;
 		handled = [self readValue:&value width:width address:address];
 		if (handled) {
-			[_hypervisor setRegister:registerIndex value:value forVCPU:_vcpu];
+			[_hypervisor setRegister:registerIndex value:value forVCPU:vcpu];
 		}
 	}
+	[_deviceLock unlock];
 
 	if (!handled) {
 		[self reportFailure:[NSString stringWithFormat:@"访问了未实现的 MMIO 地址 0x%llx（%u 字节%@）",
@@ -573,8 +745,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	// 虚拟机停在触发异常的那条指令上，模拟完要自己往前推一条，否则会反复触发。
 	uint64_t pc = 0;
-	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:_vcpu];
-	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:_vcpu];
+	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 	return YES;
 }
 
@@ -606,51 +778,100 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return YES;
 }
 
-- (BOOL)handleHypervisorCall {
+- (BOOL)handleHypervisorCallForCPU:(NSUInteger)cpuIndex vcpu:(uint64_t)vcpu {
 	uint64_t function = 0;
-	[_hypervisor getRegister:0 value:&function forVCPU:_vcpu];
+	[_hypervisor getRegister:0 value:&function forVCPU:vcpu];
 
 	uint64_t result = VL_PSCI_RET_NOT_SUPPORTED;
 
 	if (function == VL_PSCI_VERSION) {
 		result = 0x00010001; // PSCI 1.1
 	} else if (function == VL_PSCI_CPU_OFF) {
-		// 单核客户机：把 CPU_OFF 当关机处理。
-		[VLStartupLog log:@"客户机执行 CPU_OFF（单核不支持关核）"];
-		_stopRequested = YES;
-		[self reportState:VLVirtualMachineStateStopped message:@"客户机已停止（CPU_OFF）"];
+		[VLStartupLog log:@"客户机执行 CPU_OFF（%lu 号核下线）", (unsigned long)cpuIndex];
+		// CPU_OFF 按规范不返回：这个核的线程就此结束、销毁自己的 vCPU。
+		if (cpuIndex == 0) {
+			_stopRequested = YES;
+			[self exitAllProcessors];
+			[self reportState:VLVirtualMachineStateStopped message:@"客户机已停止（CPU_OFF）"];
+		}
 		return NO;
 	} else if (function == VL_PSCI_CPU_ON) {
-		result = VL_PSCI_RET_NOT_SUPPORTED;
+		uint64_t mpidr = 0;
+		uint64_t entry = 0;
+		uint64_t contextID = 0;
+		[_hypervisor getRegister:1 value:&mpidr forVCPU:vcpu];
+		[_hypervisor getRegister:2 value:&entry forVCPU:vcpu];
+		[_hypervisor getRegister:3 value:&contextID forVCPU:vcpu];
+		result = [self startCPUWithMPIDR:mpidr entry:entry contextID:contextID];
 	} else if (function == VL_PSCI_AFFINITY_INFO) {
-		result = 0; // ON
+		uint64_t mpidr = 0;
+		[_hypervisor getRegister:1 value:&mpidr forVCPU:vcpu];
+		result = [self affinityForMPIDR:mpidr];
 	} else if (function == VL_PSCI_SYSTEM_OFF) {
 		[VLStartupLog log:@"客户机请求关机"];
 		_stopRequested = YES;
+		[self exitAllProcessors];
 		[self reportState:VLVirtualMachineStateStopped message:@"客户机已关机"];
 		return NO;
 	} else if (function == VL_PSCI_SYSTEM_RESET) {
 		[VLStartupLog log:@"客户机请求重启"];
 		_stopRequested = YES;
+		[self exitAllProcessors];
 		[self reportState:VLVirtualMachineStateStopped message:@"客户机请求重启：请重新启动虚拟机"];
 		return NO;
 	}
 
-	[_hypervisor setRegister:0 value:result forVCPU:_vcpu];
+	[_hypervisor setRegister:0 value:result forVCPU:vcpu];
 	uint64_t pc = 0;
-	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:_vcpu];
-	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:_vcpu];
+	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 	return YES;
+}
+
+/// PSCI CPU_ON：叫醒一个还没开机的核。MPIDR 的低 8 位就是设备树里 cpu@N 的 reg。
+- (uint64_t)startCPUWithMPIDR:(uint64_t)mpidr entry:(uint64_t)entry contextID:(uint64_t)contextID {
+	NSUInteger index = (NSUInteger)(mpidr & 0xFF);
+	if (index >= _cpuCount) {
+		return VL_PSCI_RET_INVALID_PARAMETERS;
+	}
+
+	[_startCondition lock];
+	BOOL created = _slots[index].created;
+	BOOL alreadyOn = _slots[index].startRequested;
+	if (created && !alreadyOn && !_slots[index].finished) {
+		_slots[index].startPC = entry;
+		_slots[index].startContextID = contextID;
+		_slots[index].startRequested = YES;
+		[_startCondition broadcast];
+	}
+	[_startCondition unlock];
+
+	if (!created) {
+		return VL_PSCI_RET_INVALID_PARAMETERS;
+	}
+	return alreadyOn ? VL_PSCI_RET_ALREADY_ON : 0;
+}
+
+/// AFFINITY_INFO：0 = 在线，1 = 离线。
+- (uint64_t)affinityForMPIDR:(uint64_t)mpidr {
+	NSUInteger index = (NSUInteger)(mpidr & 0xFF);
+	if (index >= _cpuCount) {
+		return VL_PSCI_RET_INVALID_PARAMETERS;
+	}
+	[_startCondition lock];
+	BOOL online = _slots[index].created && _slots[index].startRequested && !_slots[index].finished;
+	[_startCondition unlock];
+	return online ? 0 : 1;
 }
 
 #pragma mark - 清理
 
 - (void)teardown {
-	if (_vcpu != 0) {
-		[_hypervisor destroyVCPU:_vcpu];
-		_vcpu = 0;
+	// vCPU 由各自的线程负责销毁（HVF 要求同线程），这里只回收公共资源。
+	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
+		_slots[index].vcpu = 0;
+		_slots[index].exitInfo = NULL;
 	}
-	_exitInfo = NULL;
 	if (_guestMemory != nil) {
 		[_guestMemory deallocate];
 		_guestMemory = nil;
@@ -691,6 +912,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 - (void)reportFailure:(NSString *)message {
 	[VLStartupLog log:@"虚拟化失败：%@", message];
+	[self haltAllProcessors];
 	[self reportState:VLVirtualMachineStateFailed message:message];
 }
 
