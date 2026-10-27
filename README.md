@@ -37,8 +37,8 @@
 ## 当前状态
 
 - 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译、多存储位置与冻结、设置页与日志导出、ISO 安装盘解析（抽内核/initrd、Debian 系 preseed）、Hypervisor.framework 抽取与重签脚本。
-- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示；virtio-blk 挂载系统盘镜像；virtio-input 单点触摸屏（详情页里的手指位置直接送进客户机，画面右下角「键盘」按钮弹出系统键盘送按键）；virtio-net 出站网络（ARP / DHCP / DNS 转发 / TCP 代理 / UDP 直连）；ISO 只读挂成第二块 virtio-blk，Debian 系的 preseed 自动应答经网关上的本地 HTTP 服务下发，bootargs 里带 `auto=true preseed/url=http://10.0.2.2/preseed.cfg`。
-- 尚未接入：端口转发（主机连进客户机）、IP 分片、从磁盘引导已装好的系统（目前每次启动都用 ISO 里抽出的安装内核）。
+- 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示；virtio-blk 挂载系统盘镜像；virtio-input 单点触摸屏（详情页里的手指位置直接送进客户机，画面右下角「键盘」按钮弹出系统键盘送按键）；virtio-net 出站网络（ARP / DHCP / DNS 转发 / TCP 代理 / UDP 直连）；ISO 只读挂成第二块 virtio-blk，Debian 系的 preseed 自动应答经网关上的本地 HTTP 服务下发，bootargs 里带 `auto=true preseed/url=http://10.0.2.2/preseed.cfg`；装完后 App 会解析系统盘的 GPT 与 FAT 启动分区，直接读出内核 / initrd / 内核命令行来启动，不再回退到安装镜像。
+- 尚未接入：端口转发（主机连进客户机）、IP 分片。
 - 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地用 `tools/extract-hypervisor.py` 生成后自动打进 App 的 `Frameworks/`。
 
 ## 构建
@@ -113,6 +113,6 @@ App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` → `/var/jb/usr/l
 
 ## 下一步
 
-1. 从磁盘引导已装好的系统（读 /boot 或上 UEFI 固件），否则重启会回到安装器
+1. 真机验证无人值守安装与从磁盘启动（preseed 分区方案、`late_command`、GPT/FAT 读取都还没在设备上跑过）
 2. 端口转发（主机连进客户机）与 IP 分片重组
 3. 真机验证 GIC 中断注入、EL1 虚拟定时器与 virtio 队列收发

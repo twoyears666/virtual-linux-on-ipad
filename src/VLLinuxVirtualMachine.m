@@ -7,6 +7,7 @@
 
 #import "VLDeviceBus.h"
 #import "VLDeviceTree.h"
+#import "VLDiskBootVolume.h"
 #import "VLDiskImage.h"
 #import "VLGuestMemory.h"
 #import "VLHypervisor.h"
@@ -192,6 +193,22 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	}
 }
 
+/// 系统盘里如果已经有装好的系统（安装器在启动分区里写了 VLBOOT.CFG），就把它当启动来源。
+- (VLDiskBootVolume *)openInstalledSystemBootVolume {
+	VLDiskImage *systemDisk = _configuration.disks.firstObject;
+	if (systemDisk.path.length == 0 ||
+		![NSFileManager.defaultManager fileExistsAtPath:systemDisk.path]) {
+		return nil;
+	}
+
+	VLDiskBootVolume *volume = [VLDiskBootVolume volumeWithDiskImagePath:systemDisk.path];
+	if (![volume openWithError:NULL]) {
+		return nil;
+	}
+	[VLStartupLog log:@"系统盘里找到已装好的系统，内核命令行：%@", volume.commandLine];
+	return volume;
+}
+
 - (BOOL)setupEnvironmentWithError:(NSError **)error {
 	_guestMemorySize = (uint64_t)MAX((NSUInteger)_configuration.memoryMB, (NSUInteger)128) * 1024ULL * 1024ULL;
 
@@ -209,16 +226,33 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		return NO;
 	}
 
+	// 启动来源：系统盘里已经有装好的系统就优先用它（内核 / initrd / 命令行由安装器写在
+	// 系统盘的 FAT 分区里），否则退回 ISO 里抽出来的那套安装内核。
+	VLDiskBootVolume *bootVolume = [self openInstalledSystemBootVolume];
+	NSData *diskKernel = [bootVolume dataForFileNamed:@"VMLINUZ" error:NULL];
+	NSData *diskInitrd = [bootVolume dataForFileNamed:@"INITRD" error:NULL];
+
 	// 内核：Image 直接按原始偏移装载，入口地址就是装载地址。
 	uint64_t kernelAddress = VLGuestMemoryBase + VLKernelLoadOffset;
-	NSInteger kernelSize = [_guestMemory loadFileAtPath:_configuration.kernelPath
-										 atGuestAddress:kernelAddress];
+	NSInteger kernelSize = 0;
+	if (diskKernel.length > 0) {
+		kernelSize = [_guestMemory writeData:diskKernel atGuestAddress:kernelAddress]
+			? (NSInteger)diskKernel.length
+			: 0;
+	} else {
+		kernelSize = [_guestMemory loadFileAtPath:_configuration.kernelPath
+								   atGuestAddress:kernelAddress];
+	}
 	if (kernelSize <= 0) {
 		if (error != NULL) {
 			*error = [self errorWithMessage:@"内核镜像读取失败"];
 		}
 		return NO;
 	}
+	[VLStartupLog log:@"启动来源：%@（内核 %ld 字节）",
+		diskKernel.length > 0 ? @"系统盘里已装好的系统" : @"ISO 安装内核", (long)kernelSize];
+	// 内核可能有十几 MB，装进客户机内存后立刻放掉。
+	diskKernel = nil;
 
 	uint64_t cursor = VLAlignUp(kernelAddress + (uint64_t)kernelSize, VLSegmentAlignment);
 
@@ -229,16 +263,19 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	// initrd（可选）
 	uint64_t initrdAddress = cursor;
 	uint64_t initrdEnd = initrdAddress;
-	if (_configuration.initrdPath.length > 0) {
-		NSInteger initrdSize = [_guestMemory loadFileAtPath:_configuration.initrdPath
-											  atGuestAddress:initrdAddress];
-		if (initrdSize > 0) {
-			initrdEnd = initrdAddress + (uint64_t)initrdSize;
-			cursor = VLAlignUp(initrdEnd, VLPageSize);
-		} else {
-			initrdAddress = 0;
-			initrdEnd = 0;
-		}
+	NSInteger initrdSize = 0;
+	if (diskInitrd.length > 0) {
+		initrdSize = [_guestMemory writeData:diskInitrd atGuestAddress:initrdAddress]
+			? (NSInteger)diskInitrd.length
+			: 0;
+	} else if (_configuration.initrdPath.length > 0) {
+		initrdSize = [_guestMemory loadFileAtPath:_configuration.initrdPath
+								   atGuestAddress:initrdAddress];
+	}
+	diskInitrd = nil;
+	if (initrdSize > 0) {
+		initrdEnd = initrdAddress + (uint64_t)initrdSize;
+		cursor = VLAlignUp(initrdEnd, VLPageSize);
 	} else {
 		initrdAddress = 0;
 		initrdEnd = 0;
@@ -251,15 +288,19 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		return NO;
 	}
 
-	// 自动安装：preseed 由 VLNetStack 内置的 HTTP 服务提供，所以要先让网络起来。
-	NSMutableString *bootArguments = [NSMutableString stringWithString:
-		@"console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7 panic=1"];
+	// 从系统盘启动时用安装器写下的那份命令行（里面有真实的 root=），
+	// 从 ISO 安装内核启动时才需要接上自动安装参数。
 	BOOL hasPreseed = _configuration.preseedPath.length > 0 &&
 		[NSFileManager.defaultManager fileExistsAtPath:_configuration.preseedPath];
-	if (hasPreseed) {
+	NSMutableString *bootArguments = [NSMutableString stringWithString:
+		bootVolume.commandLine.length > 0
+			? bootVolume.commandLine
+			: @"console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7 panic=1"];
+	if (hasPreseed && bootVolume.commandLine.length == 0) {
 		[bootArguments appendString:
 			@" ip=dhcp auto=true priority=critical preseed/url=http://10.0.2.2/preseed.cfg"];
 	}
+	bootVolume = nil;
 
 	NSData *deviceTree = [VLDeviceTree deviceTreeWithMemoryBase:VLGuestMemoryBase
 													memorySize:_guestMemorySize
