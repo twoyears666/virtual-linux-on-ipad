@@ -76,7 +76,7 @@ make package FINALPACKAGE=1   # 出 rootless deb
 
 ## 安装
 
-- deb：Dopamine 越狱后，用 Sileo / Filza 安装，`postinst` 会执行 `uicache` 让图标出现。
+- deb：Dopamine 越狱后，用 Sileo / Zebra / Filza 安装。`postinst` 先 `uicache -p` 刷新图标缓存，再往安装器的 `$CYDIA` 结果描述符写 `finish:restart`，所以装完会提示「重启 SpringBoard」——同意重启后主屏才会出现图标（用 Filza 直接 `dpkg -i` 装的话，装完手动 respring 一次即可）。
 - IPA：界面测试包，不带任何越狱权限（`entitlements-ipa.plist` 是空字典）。TrollStore 直接装，或 AltStore / Sideloadly 用自己的证书重签；不越狱也能装来看界面。
 - 注意：IPA 只能看界面，真正启动虚拟机仍然必须越狱（要加载私有 Hypervisor 运行时）。
 

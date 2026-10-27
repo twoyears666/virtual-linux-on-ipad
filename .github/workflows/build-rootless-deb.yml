@@ -40,6 +40,9 @@ jobs:
           plutil -lint Resources/Info.plist entitlements.plist
           test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' Resources/Info.plist)" = "14.0"
           test -x layout/DEBIAN/postinst
+          test -x layout/DEBIAN/postrm
+          # 装完要能请求安装器重启 SpringBoard，否则图标不会出现在主屏
+          grep -q 'finish:restart' layout/DEBIAN/postinst
 
       - name: 编译并打包 rootless deb
         run: make package FINALPACKAGE=1
@@ -55,6 +58,12 @@ jobs:
           echo "$listing"
           grep -q 'var/jb/Applications/VirtualLinux.app/VirtualLinux' <<<"$listing"
           grep -q 'var/jb/Applications/VirtualLinux.app/Info.plist' <<<"$listing"
+          # 维护脚本必须真进包，并且带上重启 SpringBoard 的回报
+          rm -rf /tmp/deb-control
+          dpkg-deb -e "$deb" /tmp/deb-control
+          test -x /tmp/deb-control/postinst
+          grep -q 'finish:restart' /tmp/deb-control/postinst
+          grep -q 'finish:restart' /tmp/deb-control/postrm
 
       - name: 上传 deb 产物
         uses: actions/upload-artifact@v4

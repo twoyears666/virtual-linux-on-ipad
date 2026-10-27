@@ -1,0 +1,31 @@
+#!/bin/sh
+# 卸载后清掉桌面残留图标，同样请求安装器重启 SpringBoard。
+set -e
+
+export PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/var/jb/bin:/var/jb/sbin:/usr/bin:/bin:/usr/sbin:/sbin
+
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+	if [ -x /var/jb/usr/bin/uicache ]; then
+		/var/jb/usr/bin/uicache -a >/dev/null 2>&1 || true
+	elif [ -x /usr/bin/uicache ]; then
+		/usr/bin/uicache -a >/dev/null 2>&1 || true
+	fi
+
+	if [ -n "${CYDIA:-}" ]; then
+		read -r FINISH_FD FINISH_VERSION <<EOF
+$CYDIA
+EOF
+		case "$FINISH_FD" in
+			''|*[!0-9]*) ;;
+			*)
+				if [ "${FINISH_VERSION:-0}" -ge 1 ] 2>/dev/null; then
+					echo "finish:restart" >&"$FINISH_FD"
+				fi
+				;;
+		esac
+	else
+		echo "finish:restart"
+	fi
+fi
+
+exit 0

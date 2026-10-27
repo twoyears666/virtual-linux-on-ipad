@@ -1,14 +1,44 @@
 #!/bin/sh
-# 安装后刷新桌面图标，让 rootless App 出现在主屏
+# 安装后让 App 出现在主屏：uicache 只刷新图标缓存，
+# SpringBoard 还要重启一次才会真正把图标画出来，
+# 所以按包管理器约定回报 finish:restart（Sileo / Zebra 会提示「重启 SpringBoard」）。
 set -e
 
-UICACHE=/var/jb/usr/bin/uicache
-if [ ! -x "$UICACHE" ]; then
+export PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/var/jb/bin:/var/jb/sbin:/usr/bin:/bin:/usr/sbin:/sbin
+
+APP=/var/jb/Applications/VirtualLinux.app
+
+if [ -x /var/jb/usr/bin/uicache ]; then
+	UICACHE=/var/jb/usr/bin/uicache
+else
 	UICACHE=/usr/bin/uicache
 fi
 
 if [ -x "$UICACHE" ]; then
-	"$UICACHE" -a >/dev/null 2>&1 || true
+	if [ -d "$APP" ]; then
+		"$UICACHE" -p "$APP" >/dev/null 2>&1 || true
+	else
+		"$UICACHE" -a >/dev/null 2>&1 || true
+	fi
+fi
+
+# $CYDIA 是安装器传进来的「结果描述符 + 协议版本」；
+# 往该 fd 写 finish:restart，安装器才会在装完后给出重启 SpringBoard 的动作。
+if [ -n "${CYDIA:-}" ]; then
+	read -r FINISH_FD FINISH_VERSION <<EOF
+$CYDIA
+EOF
+	case "$FINISH_FD" in
+		''|*[!0-9]*) ;;
+		*)
+			if [ "${FINISH_VERSION:-0}" -ge 1 ] 2>/dev/null; then
+				echo "finish:restart" >&"$FINISH_FD"
+			fi
+			;;
+	esac
+else
+	# 没有安装器上下文（例如 dpkg 直接装）时，stdout 至少留个提示。
+	echo "finish:restart"
 fi
 
 exit 0
