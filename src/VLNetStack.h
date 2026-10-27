@@ -19,6 +19,10 @@
 - (void)start;
 - (void)stop;
 
+/// 在网关地址的 80 端口上提供一个极简 HTTP 服务，把这份内容当作 preseed.cfg 发出去。
+/// 传 nil 表示关闭。要在 start 之前调用。
+- (void)servePreseedContents:(NSData *)contents;
+
 /// 客户机发出的一帧以太网数据（在 vCPU 线程调用，内部转到网络队列处理）。
 - (void)handleGuestFrame:(NSData *)frame;
 

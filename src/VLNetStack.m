@@ -27,6 +27,7 @@
 #define VLNetReceiveWindow 65535
 #define VLNetMaximumUDPFlows 64
 #define VLNetUDPFlowIdleTimeout 60.0
+#define VLNetHTTPRequestHeaderLimit 8192
 
 #define VLNetTCPFlagFIN 0x01
 #define VLNetTCPFlagSYN 0x02
@@ -100,6 +101,22 @@ static NSString *VLIPv4String(uint32_t address) {
 		(unsigned)((address >> 8) & 0xFF), (unsigned)(address & 0xFF)];
 }
 
+/// 在请求缓冲里找 HTTP 头结束位置（\r\n\r\n），返回头加基于它的偏移，找不到返回 -1。
+static NSInteger VLFindHTTPHeaderEnd(NSData *data) {
+	const uint8_t *bytes = data.bytes;
+	NSUInteger length = data.length;
+	if (length < 4) {
+		return -1;
+	}
+	for (NSUInteger index = 0; index + 3 < length; index++) {
+		if (bytes[index] == '\r' && bytes[index + 1] == '\n' &&
+			bytes[index + 2] == '\r' && bytes[index + 3] == '\n') {
+			return (NSInteger)(index + 4);
+		}
+	}
+	return -1;
+}
+
 #pragma mark - 一条 TCP 代理连接
 
 typedef NS_ENUM(NSInteger, VLNetTCPState) {
@@ -123,8 +140,11 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 @property (nonatomic, assign) BOOL hostClosed;
 @property (nonatomic, assign) BOOL guestClosed;
 @property (nonatomic, assign) BOOL finished;
+@property (nonatomic, assign) BOOL localHTTP;
+@property (nonatomic, assign) BOOL httpResponseSent;
 @property (nonatomic, strong) NSMutableData *outboundBuffer;
 @property (nonatomic, strong) NSMutableData *inboundBuffer;
+@property (nonatomic, strong) NSMutableData *httpRequestBuffer;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *unacknowledged;
 @property (nonatomic, strong) dispatch_source_t readSource;
 @property (nonatomic, strong) dispatch_source_t writeSource;
@@ -138,6 +158,7 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 	if (self) {
 		_outboundBuffer = [NSMutableData data];
 		_inboundBuffer = [NSMutableData data];
+		_httpRequestBuffer = [NSMutableData data];
 		_unacknowledged = [NSMutableArray array];
 		_guestWindow = VLNetReceiveWindow;
 		_socketFD = -1;
@@ -186,6 +207,7 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 	NSMutableDictionary<NSNumber *, NSNumber *> *_pendingQueries;
 	int _dnsSocket;
 	dispatch_source_t _dnsSource;
+	NSData *_preseedContents;
 	BOOL _running;
 }
 
@@ -263,10 +285,15 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 		@synchronized (strongSelf) {
 			[strongSelf->_outbound removeAllObjects];
 		}
+		strongSelf->_preseedContents = nil;
 	});
 }
 
 #pragma mark - 对外接口
+
+- (void)servePreseedContents:(NSData *)contents {
+	_preseedContents = [contents copy];
+}
 
 - (void)handleGuestFrame:(NSData *)frame {
 	if (frame.length < VLNetEthernetHeaderLength) {
@@ -725,12 +752,19 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 		connection.sendUna = connection.sendNext;
 		connection.guestWindow = window > 0 ? window : VLNetReceiveWindow;
 		connection.state = VLNetTCPStateSynReceived;
+		// 网关 80 端口的 preseed 请求由本栈自己应答，不往真实 socket 转发。
+		if (destination == VLNetGatewayAddress && destinationPort == 80 &&
+			_preseedContents != nil) {
+			connection.localHTTP = YES;
+		}
 		_connections[key] = connection;
 
 		[self sendTCPForConnection:connection
 							 flags:(VLNetTCPFlagSYN | VLNetTCPFlagACK)
 						   payload:nil];
-		[self openSocketForConnection:connection];
+		if (!connection.localHTTP) {
+			[self openSocketForConnection:connection];
+		}
 		return;
 	}
 
@@ -755,9 +789,15 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 
 	if (payloadLength > 0) {
 		if (sequence == connection.receiveNext) {
-			[connection.outboundBuffer appendBytes:payload length:payloadLength];
-			connection.receiveNext += (uint32_t)payloadLength;
-			[self flushOutboundBuffer:connection];
+			if (connection.localHTTP) {
+				[connection.httpRequestBuffer appendBytes:payload length:payloadLength];
+				connection.receiveNext += (uint32_t)payloadLength;
+				[self respondToLocalHTTPConnection:connection];
+			} else {
+				[connection.outboundBuffer appendBytes:payload length:payloadLength];
+				connection.receiveNext += (uint32_t)payloadLength;
+				[self flushOutboundBuffer:connection];
+			}
 		}
 		// 乱序或重传都不缓存，只回 ACK，让客户机自己重发。
 	}
@@ -778,6 +818,67 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 	}
 
 	[self sendTCPForConnection:connection flags:VLNetTCPFlagACK payload:nil];
+}
+
+#pragma mark - 本地 HTTP
+
+/// 请求数据累积到出现完整请求头（\r\n\r\n）后，回一份 preseed.cfg 并主动关闭。
+- (void)respondToLocalHTTPConnection:(VLNetTCPConnection *)connection {
+	if (connection.httpResponseSent || connection.finished) {
+		return;
+	}
+	NSInteger headerEnd = VLFindHTTPHeaderEnd(connection.httpRequestBuffer);
+	if (headerEnd < 0) {
+		// 头还没收全；超过上限就按 404 处理，免得一直挂着。
+		if (connection.httpRequestBuffer.length > VLNetHTTPRequestHeaderLimit) {
+			[self sendLocalHTTPResponseForConnection:connection notFound:YES];
+		}
+		return;
+	}
+	[self sendLocalHTTPResponseForConnection:connection notFound:(_preseedContents == nil)];
+}
+
+/// 按 HTTP/1.0 组一份响应，分 MSS 段发出，再补一个 FIN；只在连接上发一次。
+- (void)sendLocalHTTPResponseForConnection:(VLNetTCPConnection *)connection notFound:(BOOL)notFound {
+	if (connection.httpResponseSent || connection.finished) {
+		return;
+	}
+	connection.httpResponseSent = YES;
+
+	NSData *contents = notFound ? [NSData data] : _preseedContents;
+	NSString *head = notFound
+		? @"HTTP/1.0 404 Not Found\r\n"
+		   "Content-Length: 0\r\n"
+		   "Content-Type: text/plain\r\n"
+		   "Connection: close\r\n\r\n"
+		: [NSString stringWithFormat:@"HTTP/1.0 200 OK\r\n"
+			"Content-Length: %llu\r\n"
+			"Content-Type: text/plain\r\n"
+			"Connection: close\r\n\r\n",
+			(unsigned long long)contents.length];
+
+	NSMutableData *response = [NSMutableData dataWithData:[head dataUsingEncoding:NSUTF8StringEncoding]];
+	[response appendData:contents];
+
+	NSUInteger offset = 0;
+	while (offset < response.length) {
+		NSUInteger chunk = MIN(response.length - offset, (NSUInteger)VLNetMaximumSegmentSize);
+		NSData *part = [response subdataWithRange:NSMakeRange(offset, chunk)];
+		[self sendTCPForConnection:connection
+							 flags:(VLNetTCPFlagACK | VLNetTCPFlagPSH)
+						   payload:part];
+		offset += chunk;
+	}
+
+	connection.hostClosed = YES;
+	[self sendTCPForConnection:connection
+						 flags:(VLNetTCPFlagFIN | VLNetTCPFlagACK)
+					   payload:nil];
+
+	if (!notFound) {
+		[VLStartupLog log:@"网络：已向客户机发送 preseed（%llu 字节）",
+			(unsigned long long)contents.length];
+	}
 }
 
 - (void)openSocketForConnection:(VLNetTCPConnection *)connection {

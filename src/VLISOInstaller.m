@@ -260,8 +260,10 @@ static NSString *VLISOPreseedContents(void) {
 		return nil;
 	}
 
-	// Debian 系的安装目录优先级：amd64 → 通用 → i386；再兜底 casper（Ubuntu）与 boot。
+	// Debian 系的安装目录优先级：arm64 → amd64 → 通用 → i386；再兜底 casper（Ubuntu）与 boot。
 	NSArray<NSArray<NSString *> *> *candidates = @[
+		@[ @"install.a64", @"debian" ],
+		@[ @"install.arm64", @"debian" ],
 		@[ @"install.amd", @"debian" ],
 		@[ @"install", @"debian" ],
 		@[ @"install.386", @"debian" ],

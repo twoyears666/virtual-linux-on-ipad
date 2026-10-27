@@ -43,6 +43,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 							 gicBase:(uint64_t)gicBase
 							 gpuBase:(uint64_t)gpuBase
 							 blockBase:(uint64_t)blockBase
+							  isoBase:(uint64_t)isoBase
 							 inputBase:(uint64_t)inputBase
 							   netBase:(uint64_t)netBase {
 	VLDeviceTree *builder = [[VLDeviceTree alloc] init];
@@ -55,6 +56,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 								gicBase:gicBase
 								gpuBase:gpuBase
 							  blockBase:blockBase
+								isoBase:isoBase
 							  inputBase:inputBase
 								netBase:netBase];
 }
@@ -80,6 +82,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 						gicBase:(uint64_t)gicBase
 						gpuBase:(uint64_t)gpuBase
 							 blockBase:(uint64_t)blockBase
+							  isoBase:(uint64_t)isoBase
 							 inputBase:(uint64_t)inputBase
 							   netBase:(uint64_t)netBase {
 	[self beginNode:@""];
@@ -196,6 +199,16 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					   @((uint32_t)(netBase >> 32)), @((uint32_t)(netBase & 0xFFFFFFFF)), @0x1000, @0,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @5, @4 ]];
+	[self endNode];
+
+	// 安装镜像（只读光驱）：SPI 6
+	[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)isoBase]];
+	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
+	[self propertyNamed:@"reg"
+				   cells:@[
+					   @((uint32_t)(isoBase >> 32)), @((uint32_t)(isoBase & 0xFFFFFFFF)), @0x1000, @0,
+				   ]];
+	[self propertyNamed:@"interrupts" cells:@[ @0, @6, @4 ]];
 	[self endNode];
 
 	[self endNode];
