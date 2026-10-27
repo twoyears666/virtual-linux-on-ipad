@@ -203,7 +203,23 @@ static NSString *VLISOPreseedContents(void) {
 		"\n"
 		"d-i partman-auto/method string regular\n"
 		"d-i partman-auto/disk string /dev/vda\n"
-		"d-i partman-auto/choose_recipe select atomic\n"
+		"d-i partman-auto/choose_recipe select virtual-linux\n"
+		// 第一块 512MB FAT 区专门放内核 / initrd / 内核命令行：App 不跑 UEFI 也不跑 GRUB，
+		// 直接从这块 FAT 里读文件启动，所以分区布局必须固定、不用默认的 atomic 配方。
+		"d-i partman-auto/expert_recipe string \\\n"
+		"      virtual-linux :: \\\n"
+		"              512 512 512 fat32 \\\n"
+		"                      $primary{ } $bootable{ } \\\n"
+		"                      method{ format } format{ } \\\n"
+		"                      use_filesystem{ } filesystem{ vfat } \\\n"
+		"                      mountpoint{ /boot/efi } \\\n"
+		"              . \\\n"
+		"              8 8 -1 ext4 \\\n"
+		"                      $primary{ } \\\n"
+		"                      method{ format } format{ } \\\n"
+		"                      use_filesystem{ } filesystem{ ext4 } \\\n"
+		"                      mountpoint{ / } \\\n"
+		"              .\n"
 		"d-i partman-partitioning/confirm_write_new_label boolean true\n"
 		"d-i partman/choose_partition select finish\n"
 		"d-i partman/confirm boolean true\n"
@@ -225,8 +241,17 @@ static NSString *VLISOPreseedContents(void) {
 		"d-i pkgsel/include string openssh-server\n"
 		"popularity-contest popularity-contest/participate boolean false\n"
 		"\n"
-		"d-i grub-installer/only_debian boolean true\n"
-		"d-i grub-installer/bootdev string /dev/vda\n"
+		// 不装引导程序：App 每次启动都自己从 /boot/efi 那块 FAT 区读内核与 initrd，
+		// 客户机里既没有 UEFI 固件也没有 GRUB，让安装器去装引导反而会卡住。
+		"d-i grub-installer/skip boolean true\n"
+		"d-i lilo-installer/skip boolean true\n"
+		// 安装收尾：把内核、initrd 和内核命令行复制到那块 FAT 区，供 App 启动时读取。
+		"d-i preseed/late_command string \\\n"
+		"      in-target cp /boot/vmlinuz-* /boot/efi/VMLINUZ ; \\\n"
+		"      in-target cp /boot/initrd.img-* /boot/efi/INITRD ; \\\n"
+		"      in-target sh -c 'rootdev=$(findmnt -no SOURCE /) ;"
+		" echo \"root=PARTUUID=$(blkid -s PARTUUID -o value $rootdev)"
+		" rw console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7\" > /boot/efi/VLBOOT.CFG'\n"
 		"d-i finish-install/reboot_in_progress note\n";
 }
 
