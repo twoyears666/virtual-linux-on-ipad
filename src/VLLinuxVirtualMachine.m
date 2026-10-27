@@ -673,4 +673,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_inputServicePending = YES;
 }
 
+- (void)sendKeycode:(uint16_t)keycode pressed:(BOOL)pressed {
+	[_input sendKeycode:keycode pressed:pressed];
+	_inputServicePending = YES;
+}
+
 @end

@@ -2,11 +2,15 @@
 
 /// virtio-input：对外表现为一块单点触摸屏，App 把手指位置换算成绝对坐标事件送给客户机。
 /// 坐标范围 0 – 32767，左上角为原点。
+/// 同一个设备也会上报键盘按键（EV_KEY），这样客户机的文本安装界面能收到输入。
 @interface VLVirtioInput : VLVirtioMMIODevice
 
 - (void)touchDownAtX:(uint32_t)x y:(uint32_t)y;
 - (void)touchMoveToX:(uint32_t)x y:(uint32_t)y;
 - (void)touchUp;
+
+/// 送一个 Linux evdev 按键码（KEY_A = 30 这一套）。按下与抬起都由调用方各发一次。
+- (void)sendKeycode:(uint16_t)keycode pressed:(BOOL)pressed;
 
 /// 把攒下的事件写进客户机已经挂上来的缓冲区。
 /// 只能在 vCPU 线程调用：这里会写客户机内存并触发中断。

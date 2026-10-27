@@ -25,6 +25,42 @@
 #define VLInputAbsoluteX 0x00
 #define VLInputAbsoluteY 0x01
 
+// 键盘上报的 evdev 按键码（与 Linux input-event-codes.h 一致）
+#define VLInputKeyEsc 1
+#define VLInputKey1 2
+#define VLInputKey0 11
+#define VLInputKeyMinus 12
+#define VLInputKeyEqual 13
+#define VLInputKeyBackspace 14
+#define VLInputKeyTab 15
+#define VLInputKeyQ 16
+#define VLInputKeyP 25
+#define VLInputKeyLeftBrace 26
+#define VLInputKeyRightBrace 27
+#define VLInputKeyEnter 28
+#define VLInputKeyA 30
+#define VLInputKeyL 38
+#define VLInputKeySemicolon 39
+#define VLInputKeyApostrophe 40
+#define VLInputKeyGrave 41
+#define VLInputKeyLeftShift 42
+#define VLInputKeyBackslash 43
+#define VLInputKeyZ 44
+#define VLInputKeyM 50
+#define VLInputKeyComma 51
+#define VLInputKeyDot 52
+#define VLInputKeySlash 53
+#define VLInputKeyRightShift 54
+#define VLInputKeyLeftAlt 56
+#define VLInputKeySpace 57
+#define VLInputKeyDelete 111
+#define VLInputKeyHome 102
+#define VLInputKeyEnd 107
+#define VLInputKeyUp 103
+#define VLInputKeyLeft 105
+#define VLInputKeyRight 106
+#define VLInputKeyDown 108
+
 typedef struct {
 	uint16_t type;
 	uint16_t code;
@@ -125,6 +161,14 @@ static void VLInputWriteLE32(uint8_t *bytes, uint32_t value) {
 	}
 }
 
+- (void)addKeyBit:(uint16_t)code payload:(uint8_t *)payload size:(uint32_t *)size {
+	payload[code / 8] |= (uint8_t)(1u << (code % 8));
+	uint32_t bytes = (uint32_t)(code / 8 + 1);
+	if (bytes > *size) {
+		*size = bytes;
+	}
+}
+
 - (void)fillConfigBytes:(uint8_t *)bytes {
 	bytes[0] = (uint8_t)_configSelect;
 	bytes[1] = (uint8_t)_configSubsel;
@@ -147,8 +191,36 @@ static void VLInputWriteLE32(uint8_t *bytes, uint32_t value) {
 		size = 1;
 	} else if (_configSelect == VLInputConfigEventBits) {
 		if (_configSubsel == VLInputEventKey) {
+			// 触摸屏的 BTN_TOUCH + 一副最简键盘：字母、数字、常用符号、回车、Tab、Esc、方向键。
 			payload[VLInputButtonTouch / 8] |= (uint8_t)(1u << (VLInputButtonTouch % 8));
 			size = (uint32_t)(VLInputButtonTouch / 8 + 1);
+			const uint16_t keys[] = {
+				VLInputKeyEsc, VLInputKey1, VLInputKey0, VLInputKeyMinus, VLInputKeyEqual,
+				VLInputKeyBackspace, VLInputKeyTab, VLInputKeyEnter, VLInputKeyLeftShift,
+				VLInputKeySemicolon, VLInputKeyApostrophe, VLInputKeyGrave,
+				VLInputKeyBackslash, VLInputKeyComma, VLInputKeyDot, VLInputKeySlash,
+				VLInputKeyRightShift, VLInputKeyLeftAlt, VLInputKeySpace,
+				VLInputKeyUp, VLInputKeyDown, VLInputKeyLeft, VLInputKeyRight,
+				VLInputKeyHome, VLInputKeyEnd, VLInputKeyDelete,
+			};
+			for (size_t index = 0; index < sizeof(keys) / sizeof(keys[0]); index++) {
+				[self addKeyBit:keys[index] payload:payload size:&size];
+			}
+			// 字母与数字段：Q-P、A-L、Z-M、1-0 都是连续区间。
+			for (uint16_t code = VLInputKeyQ; code <= VLInputKeyP; code++) {
+				[self addKeyBit:code payload:payload size:&size];
+			}
+			for (uint16_t code = VLInputKeyA; code <= VLInputKeyL; code++) {
+				[self addKeyBit:code payload:payload size:&size];
+			}
+			for (uint16_t code = VLInputKeyZ; code <= VLInputKeyM; code++) {
+				[self addKeyBit:code payload:payload size:&size];
+			}
+			for (uint16_t code = VLInputKey1; code <= VLInputKey0; code++) {
+				[self addKeyBit:code payload:payload size:&size];
+			}
+			[self addKeyBit:VLInputKeyLeftBrace payload:payload size:&size];
+			[self addKeyBit:VLInputKeyRightBrace payload:payload size:&size];
 		} else if (_configSubsel == VLInputEventAbsolute) {
 			payload[0] |= (uint8_t)((1u << VLInputAbsoluteX) | (1u << VLInputAbsoluteY));
 			size = 1;
@@ -272,6 +344,14 @@ static void VLInputWriteLE32(uint8_t *bytes, uint32_t value) {
 
 	VLVirtioInputEvent events[2] = {
 		{VLInputEventKey, VLInputButtonTouch, 0},
+		{VLInputEventSyn, VLInputSynReport, 0},
+	};
+	[self enqueueEvents:events count:2];
+}
+
+- (void)sendKeycode:(uint16_t)keycode pressed:(BOOL)pressed {
+	VLVirtioInputEvent events[2] = {
+		{VLInputEventKey, keycode, pressed ? 1u : 0u},
 		{VLInputEventSyn, VLInputSynReport, 0},
 	};
 	[self enqueueEvents:events count:2];
