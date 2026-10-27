@@ -36,10 +36,10 @@
 
 ## 当前状态
 
-- 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译、多存储位置与冻结、设置页与日志导出、ISO 安装盘解析（抽内核/initrd、Debian 系 preseed）。
+- 已完成：Theos 工程、双栏界面、rootless deb 打包、分支 IPA 打包、GitHub Actions 自动编译、多存储位置与冻结、设置页与日志导出、ISO 安装盘解析（抽内核/initrd、Debian 系 preseed）、Hypervisor.framework 抽取与重签脚本。
 - 已完成（虚拟化后端）：运行时从 `Frameworks/` 加载 Hypervisor.framework；客户机内存映射；自己拼 FDT（内存 / PSCI / armv8 定时器 / GICv2 / PL011 / virtio-mmio）；设备总线与 MMIO 异常模拟；GICv2 子集（SPI + 虚拟定时器 PPI）；PL011 串口输出接到 App 日志；virtio-gpu 2D 扫描输出，客户机 flush 时把像素取回显示；virtio-blk 挂载系统盘镜像；virtio-input 单点触摸屏，详情页里的手指位置直接送进客户机。
 - 尚未接入：virtio-net（网络）。
-- 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地生成后放进 `VirtualLinux.app/Frameworks/`。
+- 不入库：从 macOS 抽取的 Apple 私有二进制（Hypervisor / Virtualization / ParavirtualizedGraphics）。版权原因不进公开仓库，需要本地用 `tools/extract-hypervisor.py` 生成后自动打进 App 的 `Frameworks/`。
 
 ## 构建
 
@@ -49,26 +49,28 @@
 make package FINALPACKAGE=1   # 出 rootless deb
 ```
 
-Hypervisor.framework 要自己从 macOS 抽取（Apple 没给 iPadOS 的 SDK），在 arm64 Mac 上：
+Hypervisor.framework 要自己从 macOS 抽取（Apple 没给 iPadOS 的 SDK）。macOS 15 起二进制不再以文件形式落在磁盘上，只在 dyld 共享缓存里，所以用脚本抽：
 
 ```sh
-# 1. 拷出二进制（同一版本号内的 macOS 与 iPadOS 15/16 内核 ABI 一致）
-mkdir -p VirtualLinux.app/Frameworks/Hypervisor.framework
-cp /System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor \
-   VirtualLinux.app/Frameworks/Hypervisor.framework/Hypervisor
-
-# 2. 让 App 能找到它，并补一个最小 Info.plist
-plutil -create xml1 VirtualLinux.app/Frameworks/Hypervisor.framework/Info.plist
-plutil -insert CFBundleIdentifier -string com.apple.Hypervisor \
-       VirtualLinux.app/Frameworks/Hypervisor.framework/Info.plist
-plutil -insert CFBundleExecutable -string Hypervisor \
-       VirtualLinux.app/Frameworks/Hypervisor.framework/Info.plist
-
-# 3. 重签成设备可加载的形态（rootless 越狱用 ldid 即可）
-ldid -S VirtualLinux.app/Frameworks/Hypervisor.framework/Hypervisor
+brew install blacktop/tap/ipsw ldid
+python3 tools/extract-hypervisor.py
 ```
 
-App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` 的顺序查找，找不到就在状态里报「Hypervisor 不可用」，不会直接闪退。
+脚本做三件事：从本机 dyld 共享缓存抽 `Hypervisor.framework`；把 Mach-O 的平台从 macOS 改成 iOS、最低版本改成 14.0（否则设备上的 dyld 不认）；`ldid -S` 重签。产物落在 `build-private/Frameworks/Hypervisor.framework`，该目录不入库，`make package` 时若存在就自动拷进 App 的 `Frameworks/`；CI 上没有这个目录，产物里不含 Apple 私有二进制。
+
+App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` → `/var/jb/usr/lib/libHypervisor.dylib` → 系统路径的顺序查找，找不到就在状态里报「Hypervisor 不可用」，不会直接闪退。
+
+## 支持安装的发行版
+
+硬条件：客户机内核必须是 arm64（aarch64）的 `Image`，并且带 virtio-blk / virtio-gpu / PL011 串口驱动；x86 的 bzImage、只走 EFI 引导的镜像都拉不起来。
+
+| 发行版 | ISO 解析 | 目前能到哪一步 |
+| --- | --- | --- |
+| Debian 11 / 12 / 13（arm64 安装盘） | 识别 `install` 目录，抽出内核与 initrd，按 `/dev/vda` 生成 preseed 自动应答 | 可引导进安装器；virtio-net 未接，联网取包与交互还没通 |
+| Ubuntu 22.04 / 24.04（arm64，casper） | 识别 `casper`，抽出内核与 initrd | 只做抽取，没有自动应答 |
+| Alpine / Fedora / Arch 等 | 只按 `boot` / `isolinux` 目录兜底找 `vmlinuz` + `initrd` | 需要自己备好 arm64 内核与 initrd |
+
+结论：还没有哪个发行版能一键装完。现在能用的是「自带 arm64 内核 + initrd，配一块 virtio 磁盘镜像」这条路径；安装器本身的自动化要等 virtio-net 和串口键盘接上。
 
 ## CI
 
@@ -109,7 +111,6 @@ App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` 的顺序查找，
 
 ## 下一步
 
-1. 从 macOS 抽取 Hypervisor 栈，`ldid` 重签后放入 `Frameworks/`
-2. virtio-net，把网络接上
-3. 内置或导入可启动的内核与根文件系统（virtio-blk 已能挂载镜像）
-4. 真机验证 GIC 中断注入、EL1 虚拟定时器与 virtio 队列收发
+1. virtio-net 与串口输入（键盘），把 Debian 安装器的自动应答跑通
+2. 内置或导入可启动的内核与根文件系统（virtio-blk 已能挂载镜像）
+3. 真机验证 GIC 中断注入、EL1 虚拟定时器与 virtio 队列收发

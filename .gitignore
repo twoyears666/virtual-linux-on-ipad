@@ -4,5 +4,6 @@ packages/
 *.ipa
 DerivedData/
 Frameworks/
+build-private/
 vendor/
 .DS_Store
