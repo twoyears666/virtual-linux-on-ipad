@@ -383,24 +383,15 @@
 }
 
 - (void)importIsoTapped {
-	NSMutableArray<UTType *> *types = [NSMutableArray array];
-	UTType *isoType = [UTType typeWithFilenameExtension:@"iso"];
-	UTType *imgType = [UTType typeWithFilenameExtension:@"img"];
-	if (isoType != nil) {
-		[types addObject:isoType];
-	}
-	if (imgType != nil) {
-		[types addObject:imgType];
-	}
-	if (types.count == 0) {
-		[types addObject:UTTypeData];
-	}
-
+	// 不用「按扩展名造 UTType」来筛文件：.iso / .img 在 iOS 上没有系统声明的类型，
+	// 动态 UTType 会让文件在选择器里「看着能点、点了没反应」。这里放开成所有文件，
+	// 选完之后我们自己校验扩展名。
 	UIDocumentPickerViewController *picker =
-		[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:YES];
+		[[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeData ] asCopy:YES];
 	picker.delegate = self;
 	picker.allowsMultipleSelection = NO;
 	self.pickingIcon = NO;
+	[VLStartupLog log:@"打开安装镜像选择器（接受所有文件，选完再校验扩展名）"];
 	[self presentViewController:picker animated:YES completion:nil];
 }
 
@@ -434,11 +425,36 @@
 		return;
 	}
 
+	NSString *extension = url.pathExtension.lowercaseString;
+	if (![extension isEqualToString:@"iso"] && ![extension isEqualToString:@"img"]) {
+		[VLStartupLog log:@"选中的文件不是安装镜像：%@", url.lastPathComponent];
+		UIAlertController *alert =
+			[UIAlertController alertControllerWithTitle:@"选的不是安装镜像"
+												message:[NSString stringWithFormat:
+													@"「%@」的扩展名不是 .iso 或 .img。",
+													url.lastPathComponent]
+										 preferredStyle:UIAlertControllerStyleAlert];
+		[alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+												  style:UIAlertActionStyleDefault
+												handler:nil]];
+		[self presentViewController:alert animated:YES completion:nil];
+		return;
+	}
+
+	NSNumber *fileSize = nil;
+	[url getResourceValue:&fileSize forKey:NSURLFileSizeKey error:NULL];
+	[VLStartupLog log:@"选择器回调：%@（%lld 字节）",
+	 url.lastPathComponent, (long long)fileSize.longLongValue];
+
 	self.isoURL = url;
 	self.isoLabel.text = url.lastPathComponent;
 	self.isoLabel.textColor = UIColor.labelColor;
 	[VLStartupLog log:@"已选择 ISO：%@", url.lastPathComponent];
 	[self updateDoneState];
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+	[VLStartupLog log:@"安装镜像选择器被取消（没有选到文件）"];
 }
 
 - (void)cancelTapped {
