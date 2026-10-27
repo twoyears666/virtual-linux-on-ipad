@@ -2,20 +2,27 @@
 
 #import "VLDevice.h"
 
+/// 当前线程在跑哪个 vCPU（0 起）。每个 vCPU 一个线程，GIC 靠它区分是哪个核在读
+/// CPU 接口寄存器；其它设备不用关心。
+uint32_t VLProcessorIndexForCurrentThread(void);
+void VLSetProcessorIndexForCurrentThread(uint32_t index);
+
 /// 只实现 Linux 启动所需的那一小撮 GICv2 行为：
-/// 分发器（0x08000000，4 KB）+ CPU 接口（0x08001000，8 KB）。
-/// 中断号 0–31 走 SPI/PPI，够串口、virtio 和定时器用。
+/// 分发器（0x08000000，4 KB）+ 每个核一份 CPU 接口（0x08001000 起，每份 8 KB）。
+/// 中断号 0–15 是 SGI，16–31 是 PPI，32 起是 SPI，够串口、virtio 和定时器用。
 @interface VLInterruptController : NSObject <VLDevice>
 
-- (instancetype)initWithBaseAddress:(uint64_t)baseAddress;
+- (instancetype)initWithBaseAddress:(uint64_t)baseAddress cpuCount:(NSUInteger)cpuCount;
 
 @property (nonatomic, readonly) uint64_t baseAddress;
 @property (nonatomic, readonly) uint32_t regionSize;
+@property (nonatomic, readonly) NSUInteger cpuCount;
 
-/// 中断线状态变化时回调，上层据此调 hv_vcpu_set_pending_interrupt。
-@property (nonatomic, copy) void (^irqLineHandler)(BOOL asserted);
+/// 某个核的中断线状态变化时回调，上层据此调 hv_vcpu_set_pending_interrupt。
+@property (nonatomic, copy) void (^irqLineHandler)(uint32_t cpuIndex, BOOL asserted);
 
-/// 由设备触发（例如 virtio 写完 used ring）。
+/// 由设备触发（例如 virtio 写完 used ring）。SGI / PPI 挂在当前线程所在的核上，
+/// SPI 挂到分发器上再按 GICD_ITARGETSR 路由给目标核。
 - (void)setIRQPending:(uint32_t)irq;
 - (void)clearIRQPending:(uint32_t)irq;
 

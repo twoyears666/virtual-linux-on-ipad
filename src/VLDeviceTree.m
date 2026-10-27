@@ -13,6 +13,8 @@ static const uint32_t VLFDTTokenEnd = 9;
 
 static const uint32_t VLFDTPHandleInterruptController = 1;
 
+static const NSUInteger VLFDTMaximumCPUs = 8;
+
 static void VLAppendBE32(NSMutableData *data, uint32_t value) {
 	uint8_t bytes[4] = {
 		(uint8_t)((value >> 24) & 0xFF),
@@ -39,19 +41,21 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					   bootArguments:(NSString *)bootArguments
 						 initrdStart:(uint64_t)initrdStart
 						   initrdEnd:(uint64_t)initrdEnd
+						   cpuCount:(NSUInteger)cpuCount
 							uartBase:(uint64_t)uartBase
 							 gicBase:(uint64_t)gicBase
 							 gpuBase:(uint64_t)gpuBase
-							 blockBase:(uint64_t)blockBase
-							  isoBase:(uint64_t)isoBase
-							 inputBase:(uint64_t)inputBase
-							   netBase:(uint64_t)netBase {
+						   blockBase:(uint64_t)blockBase
+							 isoBase:(uint64_t)isoBase
+						   inputBase:(uint64_t)inputBase
+							 netBase:(uint64_t)netBase {
 	VLDeviceTree *builder = [[VLDeviceTree alloc] init];
 	return [builder buildWithMemoryBase:memoryBase
 							 memorySize:memorySize
 						  bootArguments:bootArguments
 							initrdStart:initrdStart
 							  initrdEnd:initrdEnd
+							   cpuCount:cpuCount
 							   uartBase:uartBase
 								gicBase:gicBase
 								gpuBase:gpuBase
@@ -78,13 +82,16 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 				  bootArguments:(NSString *)bootArguments
 					initrdStart:(uint64_t)initrdStart
 					  initrdEnd:(uint64_t)initrdEnd
+					   cpuCount:(NSUInteger)cpuCount
 					   uartBase:(uint64_t)uartBase
 						gicBase:(uint64_t)gicBase
 						gpuBase:(uint64_t)gpuBase
-							 blockBase:(uint64_t)blockBase
-							  isoBase:(uint64_t)isoBase
-							 inputBase:(uint64_t)inputBase
-							   netBase:(uint64_t)netBase {
+					  blockBase:(uint64_t)blockBase
+						isoBase:(uint64_t)isoBase
+					  inputBase:(uint64_t)inputBase
+						netBase:(uint64_t)netBase {
+	NSUInteger cores = MAX((NSUInteger)1, MIN(cpuCount, VLFDTMaximumCPUs));
+
 	[self beginNode:@""];
 
 	[self propertyNamed:@"compatible" string:@"linux,dummy-virt"];
@@ -111,18 +118,21 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 				   ]];
 	[self endNode];
 
-	// cpus
+	// cpus：每个核一个节点，reg 就是 MPIDR，PSCI 的 CPU_ON 按这个值找核
 	[self beginNode:@"cpus"];
 	[self propertyNamed:@"#address-cells" cells:@[ @1 ]];
 	[self propertyNamed:@"#size-cells" cells:@[ @0 ]];
-	[self beginNode:@"cpu@0"];
-	[self propertyNamed:@"device_type" string:@"cpu"];
-	[self propertyNamed:@"reg" cells:@[ @0 ]];
-	[self propertyNamed:@"compatible" string:@"arm,cortex-a57"];
-	[self endNode];
+	for (NSUInteger core = 0; core < cores; core++) {
+		[self beginNode:[NSString stringWithFormat:@"cpu@%lu", (unsigned long)core]];
+		[self propertyNamed:@"device_type" string:@"cpu"];
+		[self propertyNamed:@"reg" cells:@[ @(core) ]];
+		[self propertyNamed:@"compatible" string:@"arm,cortex-a57"];
+		[self propertyNamed:@"enable-method" string:@"psci"];
+		[self endNode];
+	}
 	[self endNode];
 
-	// PSCI：关机/重启走 HVC
+	// PSCI：开机、关机、重启都走 HVC
 	[self beginNode:@"psci"];
 	[self propertyNamed:@"compatible" string:@"arm,psci-1.0"];
 	[self propertyNamed:@"method" string:@"hvc"];
@@ -136,7 +146,8 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"always-on" bytes:[NSData data]];
 	[self endNode];
 
-	// GICv2：分发器 4 KB + CPU 接口 8 KB
+	// GICv2：分发器 4 KB + 每核一份 8 KB 的 CPU 接口
+	uint32_t cpuInterfaceSize = (uint32_t)cores * 0x2000;
 	[self beginNode:[NSString stringWithFormat:@"interrupt-controller@%llx", (unsigned long long)gicBase]];
 	[self propertyNamed:@"compatible" string:@"arm,cortex-a15-gic"];
 	[self propertyNamed:@"#interrupt-cells" cells:@[ @3 ]];
@@ -145,7 +156,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 				   cells:@[
 					   @((uint32_t)(gicBase >> 32)), @((uint32_t)(gicBase & 0xFFFFFFFF)), @0x1000, @0,
 					   @((uint32_t)((gicBase + 0x1000) >> 32)), @((uint32_t)((gicBase + 0x1000) & 0xFFFFFFFF)),
-					   @0x2000, @0,
+					   @(cpuInterfaceSize), @0,
 				   ]];
 	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleInterruptController) ]];
 	[self endNode];
