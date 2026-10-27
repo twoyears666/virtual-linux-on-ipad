@@ -15,6 +15,7 @@
 							   gicBase:(uint64_t)gicBase
 							   gpuBase:(uint64_t)gpuBase
 							 blockBase:(uint64_t)blockBase
-							 inputBase:(uint64_t)inputBase;
+							 inputBase:(uint64_t)inputBase
+							   netBase:(uint64_t)netBase;
 
 @end

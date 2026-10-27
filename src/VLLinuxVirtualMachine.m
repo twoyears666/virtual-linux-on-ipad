@@ -11,12 +11,14 @@
 #import "VLGuestMemory.h"
 #import "VLHypervisor.h"
 #import "VLInterruptController.h"
+#import "VLNetStack.h"
 #import "VLPL011Serial.h"
 #import "VLStartupLog.h"
 #import "VLVMConfiguration.h"
 #import "VLVirtioBlock.h"
 #import "VLVirtioGPU.h"
 #import "VLVirtioInput.h"
+#import "VLVirtioNet.h"
 
 NSString *const VLLinuxVirtualMachineErrorDomain = @"com.twoyears666.virtuallinux.vm";
 
@@ -30,11 +32,13 @@ static const uint64_t VLGICBase = 0x08000000;
 static const uint64_t VLGPUBase = 0x0A000000;
 static const uint64_t VLBlockBase = 0x0B000000;
 static const uint64_t VLInputBase = 0x0C000000;
+static const uint64_t VLNetBase = 0x0D000000;
 
 // GIC 中断号：SPI 从 32 开始，PPI 27 是 EL1 虚拟定时器
 static const uint32_t VLGPUInterrupt = 34;
 static const uint32_t VLBlockInterrupt = 35;
 static const uint32_t VLInputInterrupt = 36;
+static const uint32_t VLNetInterrupt = 37;
 static const uint32_t VLPPIVirtualTimer = 27;
 
 /// HVC 调用（PSCI）里的功能号
@@ -61,6 +65,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	VLVirtioGPU *_gpu;
 	VLVirtioBlock *_block;
 	VLVirtioInput *_input;
+	VLVirtioNet *_net;
+	VLNetStack *_network;
 
 	uint64_t _vcpu;
 	VLHypervisorExit *_exitInfo;
@@ -251,7 +257,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 														 gicBase:VLGICBase
 														 gpuBase:VLGPUBase
 													   blockBase:VLBlockBase
-													   inputBase:VLInputBase];
+													   inputBase:VLInputBase
+														 netBase:VLNetBase];
 	if (![_guestMemory writeData:deviceTree atGuestAddress:deviceTreeAddress]) {
 		if (error != NULL) {
 			*error = [self errorWithMessage:@"设备树写入失败"];
@@ -361,6 +368,16 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 									   interruptNumber:VLInputInterrupt
 								 interruptController:_interruptController];
 	[_deviceBus addDevice:_input];
+
+	// 网络：virtio-net 只负责搬帧，ARP/DHCP/DNS/TCP 代理都在 VLNetStack 里。
+	_network = [[VLNetStack alloc] init];
+	[_network start];
+	_net = [[VLVirtioNet alloc] initWithBaseAddress:VLNetBase
+									   guestMemory:_guestMemory
+								   interruptNumber:VLNetInterrupt
+							 interruptController:_interruptController
+										   network:_network];
+	[_deviceBus addDevice:_net];
 }
 
 - (void)runProcessorLoop {
@@ -396,6 +413,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 				_inputServicePending = NO;
 				[_input servicePendingEvents];
 			}
+			// 网络栈攒下的下行帧要及时交给客户机，否则 TCP 会一直等。
+			[_net serviceReceive];
 			if (reason == VLHypervisorExitReasonVTimer) {
 				// 客户机虚拟定时器到期：把 PPI 27 挂到 GIC 上。
 				[_interruptController setIRQPending:VLPPIVirtualTimer];
@@ -568,6 +587,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_gpu = nil;
 	_block = nil;
 	_input = nil;
+	_net = nil;
+	[_network stop];
+	_network = nil;
 }
 
 #pragma mark - 回调
