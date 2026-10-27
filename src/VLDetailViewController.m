@@ -791,6 +791,26 @@
 		display.statusText = [self machineStatusText];
 	}
 
+	__weak typeof(self) weakSelf = self;
+	display.touchHandler = ^(VLDisplayTouchPhase phase, CGFloat x, CGFloat y) {
+		typeof(self) strongSelf = weakSelf;
+		VLLinuxVirtualMachine *machine = strongSelf.virtualMachine;
+		if (machine == nil) {
+			return;
+		}
+		switch (phase) {
+			case VLDisplayTouchPhaseBegan:
+				[machine sendTouchBeganAtNormalizedX:x y:y];
+				break;
+			case VLDisplayTouchPhaseMoved:
+				[machine sendTouchMovedToNormalizedX:x y:y];
+				break;
+			case VLDisplayTouchPhaseEnded:
+				[machine sendTouchEnded];
+				break;
+		}
+	};
+
 	UIView *container = [[UIView alloc] init];
 	container.translatesAutoresizingMaskIntoConstraints = NO;
 	display.translatesAutoresizingMaskIntoConstraints = NO;

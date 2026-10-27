@@ -26,4 +26,7 @@
 /// 一帧画面：BGRA 8888，行距紧密（width * 4）。
 @property (nonatomic, copy) void (^frameHandler)(uint32_t width, uint32_t height, NSData *frame);
 
+/// 每秒最多交给界面多少帧；0 表示不限。界面刷新再快也画不出来，限住能省下每帧的拷贝。
+@property (nonatomic, assign) uint32_t maximumFramesPerSecond;
+
 @end

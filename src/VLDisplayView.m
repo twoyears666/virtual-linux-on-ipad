@@ -6,6 +6,8 @@
 
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, assign) BOOL showingFrame;
+@property (nonatomic, assign) uint32_t frameWidth;
+@property (nonatomic, assign) uint32_t frameHeight;
 
 @end
 
@@ -82,6 +84,9 @@
 	self.layer.contents = (__bridge id)image;
 	CGImageRelease(image);
 
+	self.frameWidth = width;
+	self.frameHeight = height;
+
 	if (!self.showingFrame) {
 		self.showingFrame = YES;
 		self.statusLabel.text = nil;
@@ -94,6 +99,64 @@
 	self.layer.contents = nil;
 	self.layer.borderColor = UIColor.tertiaryLabelColor.CGColor;
 	self.statusLabel.text = self.statusText;
+}
+
+#pragma mark - 触摸
+
+/// 画面按 kCAGravityResizeAspect 居中留黑边，这里算回真正的画面区域。
+- (CGRect)imageRectInBounds {
+	if (self.frameWidth == 0 || self.frameHeight == 0) {
+		return CGRectZero;
+	}
+	CGFloat boundsWidth = CGRectGetWidth(self.bounds);
+	CGFloat boundsHeight = CGRectGetHeight(self.bounds);
+	if (boundsWidth <= 0 || boundsHeight <= 0) {
+		return CGRectZero;
+	}
+	CGFloat scale = MIN(boundsWidth / (CGFloat)self.frameWidth, boundsHeight / (CGFloat)self.frameHeight);
+	CGFloat width = (CGFloat)self.frameWidth * scale;
+	CGFloat height = (CGFloat)self.frameHeight * scale;
+	return CGRectMake((boundsWidth - width) / 2.0, (boundsHeight - height) / 2.0, width, height);
+}
+
+- (void)handleTouches:(NSSet<UITouch *> *)touches
+				phase:(VLDisplayTouchPhase)phase
+		 allowOutside:(BOOL)allowOutside {
+	if (self.touchHandler == nil) {
+		return;
+	}
+	UITouch *touch = touches.anyObject;
+	CGRect rect = [self imageRectInBounds];
+	if (touch == nil || CGRectIsEmpty(rect)) {
+		return;
+	}
+
+	CGPoint point = [touch locationInView:self];
+	if (!allowOutside && !CGRectContainsPoint(rect, point)) {
+		return;
+	}
+
+	CGFloat x = (point.x - CGRectGetMinX(rect)) / CGRectGetWidth(rect);
+	CGFloat y = (point.y - CGRectGetMinY(rect)) / CGRectGetHeight(rect);
+	x = MIN(MAX(x, 0.0), 1.0);
+	y = MIN(MAX(y, 0.0), 1.0);
+	self.touchHandler(phase, x, y);
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	[self handleTouches:touches phase:VLDisplayTouchPhaseBegan allowOutside:NO];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	[self handleTouches:touches phase:VLDisplayTouchPhaseMoved allowOutside:YES];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	[self handleTouches:touches phase:VLDisplayTouchPhaseEnded allowOutside:YES];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	[self handleTouches:touches phase:VLDisplayTouchPhaseEnded allowOutside:YES];
 }
 
 @end

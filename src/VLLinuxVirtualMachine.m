@@ -1,17 +1,22 @@
 #import "VLLinuxVirtualMachine.h"
 
+#import <math.h>
 #import <string.h>
 #import <sys/stat.h>
+#import <unistd.h>
 
 #import "VLDeviceBus.h"
 #import "VLDeviceTree.h"
+#import "VLDiskImage.h"
 #import "VLGuestMemory.h"
 #import "VLHypervisor.h"
 #import "VLInterruptController.h"
 #import "VLPL011Serial.h"
 #import "VLStartupLog.h"
 #import "VLVMConfiguration.h"
+#import "VLVirtioBlock.h"
 #import "VLVirtioGPU.h"
+#import "VLVirtioInput.h"
 
 NSString *const VLLinuxVirtualMachineErrorDomain = @"com.twoyears666.virtuallinux.vm";
 
@@ -23,9 +28,13 @@ static const uint64_t VLSegmentAlignment = 0x200000;
 static const uint64_t VLUARTBase = 0x09000000;
 static const uint64_t VLGICBase = 0x08000000;
 static const uint64_t VLGPUBase = 0x0A000000;
+static const uint64_t VLBlockBase = 0x0B000000;
+static const uint64_t VLInputBase = 0x0C000000;
 
 // GIC 中断号：SPI 从 32 开始，PPI 27 是 EL1 虚拟定时器
 static const uint32_t VLGPUInterrupt = 34;
+static const uint32_t VLBlockInterrupt = 35;
+static const uint32_t VLInputInterrupt = 36;
 static const uint32_t VLPPIVirtualTimer = 27;
 
 /// HVC 调用（PSCI）里的功能号
@@ -50,9 +59,13 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	VLInterruptController *_interruptController;
 	VLPL011Serial *_serial;
 	VLVirtioGPU *_gpu;
+	VLVirtioBlock *_block;
+	VLVirtioInput *_input;
 
 	uint64_t _vcpu;
 	VLHypervisorExit *_exitInfo;
+	NSUInteger _exitCount;
+	BOOL _inputServicePending;
 
 	BOOL _stopRequested;
 	BOOL _framePending;
@@ -104,6 +117,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	_hypervisor = hypervisor;
 	_stopRequested = NO;
+	_exitCount = 0;
+	_inputServicePending = NO;
 	[self parseDisplayResolution];
 	[self reportState:VLVirtualMachineStateStarting message:@"创建虚拟硬件…"];
 
@@ -234,7 +249,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 													   initrdEnd:initrdEnd
 														uartBase:VLUARTBase
 														 gicBase:VLGICBase
-														 gpuBase:VLGPUBase];
+														 gpuBase:VLGPUBase
+													   blockBase:VLBlockBase
+													   inputBase:VLInputBase];
 	if (![_guestMemory writeData:deviceTree atGuestAddress:deviceTreeAddress]) {
 		if (error != NULL) {
 			*error = [self errorWithMessage:@"设备树写入失败"];
@@ -308,6 +325,42 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		[strongSelf deliverFrameWidth:width height:height data:frame];
 	};
 	[_deviceBus addDevice:_gpu];
+
+	// 显示设置里的帧率上限直接透给 GPU，超出的 FLUSH 先攒着，不白拷一遍。
+	switch (_configuration.frameRateLimit) {
+		case VLFrameRateLimit60:
+			_gpu.maximumFramesPerSecond = 60;
+			break;
+		case VLFrameRateLimitUnlimited:
+			_gpu.maximumFramesPerSecond = 0;
+			break;
+		case VLFrameRateLimit30:
+		default:
+			_gpu.maximumFramesPerSecond = 30;
+			break;
+	}
+
+	// 系统盘：第一块盘的镜像挂到 virtio-blk，没有镜像就不挂。
+	VLDiskImage *systemDisk = _configuration.disks.firstObject;
+	if (systemDisk.path.length > 0 &&
+		[NSFileManager.defaultManager fileExistsAtPath:systemDisk.path]) {
+		_block = [[VLVirtioBlock alloc] initWithBaseAddress:VLBlockBase
+											   guestMemory:_guestMemory
+										   interruptNumber:VLBlockInterrupt
+									 interruptController:_interruptController
+											 imagePath:systemDisk.path
+											  readOnly:systemDisk.readOnly];
+		[_deviceBus addDevice:_block];
+	} else {
+		[VLStartupLog log:@"没有可用的系统盘镜像，virtio-blk 跳过"];
+	}
+
+	// 触摸屏：详情页里的手指位置通过它送进客户机。
+	_input = [[VLVirtioInput alloc] initWithBaseAddress:VLInputBase
+										   guestMemory:_guestMemory
+									   interruptNumber:VLInputInterrupt
+								 interruptController:_interruptController];
+	[_deviceBus addDevice:_input];
 }
 
 - (void)runProcessorLoop {
@@ -325,8 +378,23 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 			}
 
 			uint32_t reason = _exitInfo->reason;
+			// 第一次退出最能说明底层通不通，单独记一条，省得靠猜。
+			if (_exitCount == 0) {
+				_exitCount = 1;
+				uint64_t pc = 0;
+				[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:_vcpu];
+				uint64_t syndrome = reason == VLHypervisorExitReasonException
+					? _exitInfo->info.exception.syndrome
+					: 0;
+				[VLStartupLog log:@"vCPU 首次退出：原因=%u PC=0x%llx ESR=0x%llx",
+				 reason, (unsigned long long)pc, (unsigned long long)syndrome];
+			}
 			if (reason == VLHypervisorExitReasonCanceled) {
 				continue;
+			}
+			if (_inputServicePending) {
+				_inputServicePending = NO;
+				[_input servicePendingEvents];
 			}
 			if (reason == VLHypervisorExitReasonVTimer) {
 				// 客户机虚拟定时器到期：把 PPI 27 挂到 GIC 上。
@@ -355,6 +423,18 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	if (exceptionClass == 0x24 || exceptionClass == 0x25) {
 		return [self handleDataAbortSyndrome:syndrome address:address];
+	}
+	if (exceptionClass == 0x01) {
+		// WFI/WFE 陷入：客户机在等中断。让出一点 CPU 再往前走，避免空转刷满。
+		if (_inputServicePending) {
+			_inputServicePending = NO;
+			[_input servicePendingEvents];
+		}
+		usleep(500);
+		uint64_t pc = 0;
+		[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:_vcpu];
+		[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:_vcpu];
+		return YES;
 	}
 	if (exceptionClass == 0x16) {
 		return [self handleHypervisorCall];
@@ -486,6 +566,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_interruptController = nil;
 	_serial = nil;
 	_gpu = nil;
+	_block = nil;
+	_input = nil;
 }
 
 #pragma mark - 回调
@@ -537,6 +619,36 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 			strongSelf->_framePending = NO;
 		}
 	});
+}
+
+#pragma mark - 触摸
+
+/// App 里的比例坐标（0 – 1）换算成 virtio-input 的绝对坐标（0 – 32767）。
+- (uint32_t)touchCoordinateForNormalized:(double)value {
+	double clamped = value;
+	if (clamped < 0) {
+		clamped = 0;
+	} else if (clamped > 1) {
+		clamped = 1;
+	}
+	return (uint32_t)lround(clamped * 32767.0);
+}
+
+- (void)sendTouchBeganAtNormalizedX:(double)x y:(double)y {
+	[_input touchDownAtX:[self touchCoordinateForNormalized:x]
+					   y:[self touchCoordinateForNormalized:y]];
+	_inputServicePending = YES;
+}
+
+- (void)sendTouchMovedToNormalizedX:(double)x y:(double)y {
+	[_input touchMoveToX:[self touchCoordinateForNormalized:x]
+					   y:[self touchCoordinateForNormalized:y]];
+	_inputServicePending = YES;
+}
+
+- (void)sendTouchEnded {
+	[_input touchUp];
+	_inputServicePending = YES;
 }
 
 @end

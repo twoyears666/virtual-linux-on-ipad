@@ -44,8 +44,23 @@ static NSString *const VLStorageManagerDefaultFolder = @"VirtualMachines";
 #pragma mark - 默认位置
 
 - (NSURL *)defaultDirectoryURL {
+	// 优先落到 App 沙盒外的共享目录：卸载重装、丢越狱、换签名都不会带走虚拟机。
+	// App Store 沙盒环境写不进去时再退回 Documents。
+	NSFileManager *manager = NSFileManager.defaultManager;
+	NSString *sharedRoot = @"/var/mobile/Media";
+	if ([manager fileExistsAtPath:sharedRoot]) {
+		NSURL *shared = [[NSURL fileURLWithPath:sharedRoot isDirectory:YES]
+			URLByAppendingPathComponent:VLStorageManagerDefaultFolder isDirectory:YES];
+		if ([manager createDirectoryAtURL:shared
+			 withIntermediateDirectories:YES
+							  attributes:nil
+								   error:NULL]) {
+			return shared;
+		}
+	}
+
 	NSURL *documents =
-		[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+		[manager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
 	if (documents == nil) {
 		documents = [NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES];
 	}
