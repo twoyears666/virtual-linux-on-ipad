@@ -8,6 +8,10 @@
 	<true/>
 	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
+	<!-- 系统文件选择器是独立进程，选中文件后要靠这个权限把文件访问权交回本 App；
+	     缺了它，选择器里文件看着能点、点了却没有任何回调。 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 	<key>get-task-allow</key>
 	<true/>
 </dict>

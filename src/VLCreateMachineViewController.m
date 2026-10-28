@@ -314,13 +314,20 @@
 	self.isoLabel.textColor = UIColor.secondaryLabelColor;
 	self.isoLabel.numberOfLines = 0;
 
+	// 越狱环境里系统文件选择器不一定可用，留一个直接写路径的入口兜底。
+	UIButton *pathButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[pathButton setTitle:@"直接输入文件路径" forState:UIControlStateNormal];
+	pathButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+	pathButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+	[pathButton addTarget:self action:@selector(manualISOPathTapped) forControlEvents:UIControlEventTouchUpInside];
+
 	UILabel *note = [[UILabel alloc] init];
 	note.text = @"点完成后会先把 ISO 与磁盘镜像准备好，全部完成才回到主界面";
 	note.numberOfLines = 0;
 	note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
 	note.textColor = UIColor.secondaryLabelColor;
 
-	return [self cardWithTitle:@"安装镜像" rows:@[ importButton, self.isoLabel, note ]];
+	return [self cardWithTitle:@"安装镜像" rows:@[ importButton, self.isoLabel, pathButton, note ]];
 }
 
 #pragma mark - 动作
@@ -455,6 +462,57 @@
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
 	[VLStartupLog log:@"安装镜像选择器被取消（没有选到文件）"];
+}
+
+#pragma mark - 手动输入路径
+
+- (void)manualISOPathTapped {
+	UIAlertController *alert =
+		[UIAlertController alertControllerWithTitle:@"直接输入文件路径"
+											message:@"例如 /var/mobile/Media/debian-12.5.0-arm64-netinst.iso"
+									 preferredStyle:UIAlertControllerStyleAlert];
+	[alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+		field.placeholder = @"/var/mobile/Media/xxx.iso";
+		field.autocorrectionType = UITextAutocorrectionTypeNo;
+		field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+		field.text = @"/var/mobile/Media/";
+	}];
+	[alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+	__weak typeof(self) weakSelf = self;
+	[alert addAction:[UIAlertAction actionWithTitle:@"使用" style:UIAlertActionStyleDefault
+										   handler:^(UIAlertAction *action) {
+		[weakSelf applyManualISOPath:alert.textFields.firstObject.text];
+	}]];
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)applyManualISOPath:(NSString *)rawPath {
+	NSString *path = [rawPath stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+	if (path.length == 0) {
+		return;
+	}
+	NSString *extension = path.pathExtension.lowercaseString;
+	BOOL extensionOK = [extension isEqualToString:@"iso"] || [extension isEqualToString:@"img"];
+	BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:path];
+	[VLStartupLog log:@"手动输入安装镜像：%@（存在=%d，扩展名=%@）", path, exists ? 1 : 0, extension];
+
+	if (!exists || !extensionOK) {
+		UIAlertController *alert =
+			[UIAlertController alertControllerWithTitle:@"路径不对"
+												message:exists
+													? @"这个文件的扩展名不是 .iso 或 .img。"
+													: @"这个路径上没有文件。越狱设备上 ISO 一般放在 /var/mobile/Media 下。"
+										 preferredStyle:UIAlertControllerStyleAlert];
+		[alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+		[self presentViewController:alert animated:YES completion:nil];
+		return;
+	}
+
+	self.isoURL = [NSURL fileURLWithPath:path];
+	self.isoLabel.text = path.lastPathComponent;
+	self.isoLabel.textColor = UIColor.labelColor;
+	[VLStartupLog log:@"已选择 ISO（手动路径）：%@", path];
+	[self updateDoneState];
 }
 
 - (void)cancelTapped {
