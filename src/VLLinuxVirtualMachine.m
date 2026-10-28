@@ -92,6 +92,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	NSUInteger _exitCount;
 	BOOL _inputServicePending;
+	/// 系统寄存器陷入的次数；只用来限制日志条数。
+	NSUInteger _systemRegisterTrapCount;
 
 	/// 每个 vCPU 一份。0 号核跑在 runVirtualMachine 的线程上，其余各自一个线程。
 	VLVCPUSlot _slots[VLMaximumCPUs];
@@ -153,6 +155,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_stopRequested = NO;
 	_exitCount = 0;
 	_inputServicePending = NO;
+	_systemRegisterTrapCount = 0;
 	[_startCondition lock];
 	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
 		memset(&_slots[index], 0, sizeof(VLVCPUSlot));
@@ -709,6 +712,11 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	if (exceptionClass == 0x16) {
 		return [self handleHypervisorCallForCPU:cpuIndex vcpu:vcpu];
 	}
+	if (exceptionClass == 0x18) {
+		// 系统寄存器陷入：Apple 的 Hypervisor 没实现这个寄存器（例如 ID_AA64ISAR2_EL1），
+		// 内核一读就直接退出。按「该特性不存在」返回 0，然后跳过这条指令继续跑。
+		return [self handleSystemRegisterTrap:syndrome vcpu:vcpu];
+	}
 
 	uint64_t pc = 0;
 	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
@@ -716,6 +724,36 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 						 exceptionClass, (unsigned long long)syndrome,
 						 (unsigned long long)address, (unsigned long long)pc]];
 	return NO;
+}
+
+- (BOOL)handleSystemRegisterTrap:(uint64_t)syndrome vcpu:(uint64_t)vcpu {
+	// ISS 布局（EC=0x18）：bit0 方向（1=读 MRS，0=写 MSR），
+	// [4:1] CRm，[8:5] Rt，[12:9] CRn，[16:13] Op1，[19:17] Op2，[21:20] Op0。
+	uint32_t iss = (uint32_t)(syndrome & 0x1FFFFFF);
+	BOOL isRead = (iss & 0x1) != 0;
+	uint32_t crm = (iss >> 1) & 0xF;
+	uint32_t rt = (iss >> 5) & 0x1F;
+	uint32_t crn = (iss >> 9) & 0xF;
+	uint32_t op1 = (iss >> 13) & 0xF;
+	uint32_t op2 = (iss >> 17) & 0x7;
+	uint32_t op0 = (iss >> 20) & 0x3;
+
+	// 一律按 0 返回：对 ID 寄存器等于「这项特性没有」，Linux 会走通用实现。
+	if (isRead && rt < 31) {
+		[_hypervisor setRegister:rt value:0 forVCPU:vcpu];
+	}
+
+	// 只记前十几条，免得每核每寄存器都刷一行。
+	if (_systemRegisterTrapCount < 16) {
+		[VLStartupLog log:@"系统寄存器陷入（%@）：op0=%u op1=%u CRn=%u CRm=%u op2=%u Rt=%u，按 0 处理",
+		 isRead ? @"读" : @"写", op0, op1, crn, crm, op2, rt];
+	}
+	_systemRegisterTrapCount++;
+
+	uint64_t pc = 0;
+	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
+	return YES;
 }
 
 - (BOOL)handleDataAbortSyndrome:(uint64_t)syndrome address:(uint64_t)address vcpu:(uint64_t)vcpu {
