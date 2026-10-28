@@ -26,9 +26,12 @@ typedef struct {
 	} info;
 } VLHypervisorExit;
 
-/// 通用寄存器编号（hv_reg_t）：X0–X30 为 0–30。
+/// 通用寄存器编号，必须和 hv_reg_t 完全对齐：
+/// X0–X28 = 0–28，FP = 29，LR = 30，PC = 31，FPCR = 32，FPSR = 33，CPSR = 34。
 static const uint32_t VLHypervisorRegisterPC = 31;
-static const uint32_t VLHypervisorRegisterCPSR = 32;
+static const uint32_t VLHypervisorRegisterFPCR = 32;
+static const uint32_t VLHypervisorRegisterFPSR = 33;
+static const uint32_t VLHypervisorRegisterCPSR = 34;
 
 /// ARM64 内存属性位（hv_memory_flags_t）。
 typedef NS_OPTIONS(uint32_t, VLHypervisorMemoryFlags) {

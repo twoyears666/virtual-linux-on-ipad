@@ -643,8 +643,14 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 				uint64_t syndrome = reason == VLHypervisorExitReasonException
 					? exitInfo->info.exception.syndrome
 					: 0;
-				[VLStartupLog log:@"vCPU 首次退出：原因=%u PC=0x%llx ESR=0x%llx",
-				 reason, (unsigned long long)pc, (unsigned long long)syndrome];
+				uint64_t faultAddress = reason == VLHypervisorExitReasonException
+					? exitInfo->info.exception.virtualAddress
+					: 0;
+				uint64_t cpsr = 0;
+				[_hypervisor getRegister:VLHypervisorRegisterCPSR value:&cpsr forVCPU:vcpu];
+				[VLStartupLog log:@"vCPU 首次退出：原因=%u PC=0x%llx ESR=0x%llx FAR=0x%llx CPSR=0x%llx",
+				 reason, (unsigned long long)pc, (unsigned long long)syndrome,
+				 (unsigned long long)faultAddress, (unsigned long long)cpsr];
 			}
 			if (reason == VLHypervisorExitReasonCanceled) {
 				continue;
@@ -704,8 +710,11 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		return [self handleHypervisorCallForCPU:cpuIndex vcpu:vcpu];
 	}
 
-	[self reportFailure:[NSString stringWithFormat:@"未处理的异常 EC=0x%x ESR=0x%llx",
-						 exceptionClass, (unsigned long long)syndrome]];
+	uint64_t pc = 0;
+	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+	[self reportFailure:[NSString stringWithFormat:@"未处理的异常 EC=0x%x ESR=0x%llx FAR=0x%llx PC=0x%llx",
+						 exceptionClass, (unsigned long long)syndrome,
+						 (unsigned long long)address, (unsigned long long)pc]];
 	return NO;
 }
 

@@ -368,6 +368,11 @@ static NSString *VLISOPreseedContents(void) {
 	if ([family isEqualToString:@"debian"]) {
 		NSURL *autoInstallDirectory =
 			[machineDirectory URLByAppendingPathComponent:@"autoinstall" isDirectory:YES];
+		// 先建目录：直接用 writeToURL 会因为父目录不存在而失败。
+		[NSFileManager.defaultManager createDirectoryAtURL:autoInstallDirectory
+							   withIntermediateDirectories:YES
+												attributes:nil
+													 error:NULL];
 		NSURL *preseedURL = [autoInstallDirectory URLByAppendingPathComponent:@"preseed.cfg"];
 		NSError *writeError = nil;
 		if ([VLISOPreseedContents() writeToURL:preseedURL
