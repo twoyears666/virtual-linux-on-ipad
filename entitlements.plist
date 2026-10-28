@@ -12,6 +12,15 @@
 	     缺了它，选择器里文件看着能点、点了却没有任何回调。 -->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
+	<!-- 加载 ad-hoc 签名（只有 cdhash、没有证书链）的第三方二进制，必须显式声明，
+	     否则 AMFI 在 dlopen 那一刻直接杀掉进程，且不写崩溃日志。 -->
+	<key>com.apple.private.amfi.can-execute-cdhash</key>
+	<true/>
+	<!-- 调用 hv_* 需要的内核特权。 -->
+	<key>com.apple.private.hypervisor</key>
+	<true/>
+	<key>com.apple.private.memorystatus</key>
+	<true/>
 	<key>get-task-allow</key>
 	<true/>
 </dict>

@@ -20,6 +20,8 @@ jobs:
     runs-on: macos-14
     env:
       THEOS: ${{ github.workspace }}/.theos-src
+      # 参考项目 VirtualMacOniPad 的发布包，里面是已验证可加载的 Hypervisor.framework
+      VM_REF_DEB_URL: https://github.com/nfzerox/VirtualMacOniPad/releases/download/1.2.3/VirtualMac_1.2.3.deb
     steps:
       - name: 检出仓库源码
         uses: actions/checkout@v4
@@ -64,6 +66,41 @@ jobs:
           test -x /tmp/deb-control/postinst
           grep -q 'finish:restart' /tmp/deb-control/postinst
           grep -q 'finish:restart' /tmp/deb-control/postrm
+
+      - name: 注入 Hypervisor 框架并重签
+        run: |
+          set -euo pipefail
+          deb="$(ls packages/*.deb | head -1)"
+          mkdir -p /tmp/vm-ref /tmp/vl-root
+          curl -fsSL -o /tmp/vm-ref/vm.deb "$VM_REF_DEB_URL"
+          ( cd /tmp/vm-ref && ar x vm.deb && mkdir -p payload && tar -xf data.tar.xz -C payload )
+          framework="/tmp/vm-ref/payload/var/root/VirtualMac/payload/Frameworks/Hypervisor.framework"
+          test -f "$framework/Hypervisor"
+          dpkg-deb -R "$deb" /tmp/vl-root
+          app="/tmp/vl-root/var/jb/Applications/VirtualLinux.app"
+          mkdir -p "$app/Frameworks"
+          cp -R "$framework" "$app/Frameworks/"
+          # 必须用 codesign：ldid 会重建 LINKEDIT，把 chained fixups 弄丢，dlopen 时进程直接被 AMFI 杀掉
+          codesign --force --sign - --entitlements entitlements.plist "$app/VirtualLinux"
+          dpkg-deb --root-owner-group -b /tmp/vl-root "/tmp/$(basename "$deb")"
+          mv "/tmp/$(basename "$deb")" "$deb"
+          echo "已注入框架：$deb"
+
+      - name: 校验注入结果
+        run: |
+          set -euo pipefail
+          deb="$(ls packages/*.deb | head -1)"
+          listing="$(dpkg-deb -c "$deb")"
+          grep -q 'Applications/VirtualLinux.app/Frameworks/Hypervisor.framework/' <<<"$listing"
+          rm -rf /tmp/vl-check
+          dpkg-deb -R "$deb" /tmp/vl-check
+          bin=/tmp/vl-check/var/jb/Applications/VirtualLinux.app/VirtualLinux
+          # chained fixups 必须在：缺了它 dyld 无法绑定指针，加载即崩
+          otool -l "$bin" | grep -q LC_DYLD_CHAINED_FIXUPS
+          otool -l "$(dirname "$bin")/Frameworks/Hypervisor.framework/Hypervisor" | grep -q LC_DYLD_CHAINED_FIXUPS
+          # 加载 ad-hoc 签名的第三方二进制需要这条权限
+          ldid -e "$bin" | grep -q can-execute-cdhash
+          ldid -e "$bin" | grep -q com.apple.private.hypervisor
 
       - name: 上传 deb 产物
         uses: actions/upload-artifact@v4

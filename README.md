@@ -56,7 +56,7 @@ brew install blacktop/tap/ipsw ldid
 python3 tools/extract-hypervisor.py
 ```
 
-脚本做三件事：从本机 dyld 共享缓存抽 `Hypervisor.framework`；把 Mach-O 的平台从 macOS 改成 iOS、最低版本改成 14.0（否则设备上的 dyld 不认）；`ldid -S` 重签。产物落在 `build-private/Frameworks/Hypervisor.framework`，该目录不入库，`make package` 时若存在就自动拷进 App 的 `Frameworks/`；CI 上没有这个目录，产物里不含 Apple 私有二进制。
+脚本做三件事：从本机 dyld 共享缓存抽 `Hypervisor.framework`；把 Mach-O 的平台从 macOS 改成 iOS、最低版本改成 14.0（否则设备上的 dyld 不认）；`codesign -s -` 重签（**不能用 `ldid -S`**：它会重建 LINKEDIT、丢掉共享缓存带出来的 `LC_DYLD_CHAINED_FIXUPS`，dyld 无法做指针绑定，dlopen 瞬间进程被杀且不留崩溃日志）。产物落在 `build-private/Frameworks/Hypervisor.framework`，该目录不入库，`make package` 时若存在就自动拷进 App 的 `Frameworks/`；CI 上没有这个目录，产物里不含 Apple 私有二进制。
 
 App 启动时按 `Frameworks/Hypervisor.framework/Hypervisor` → `/var/jb/usr/lib/libHypervisor.dylib` → 系统路径的顺序查找，找不到就在状态里报「Hypervisor 不可用」，不会直接闪退。
 

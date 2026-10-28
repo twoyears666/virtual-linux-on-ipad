@@ -106,9 +106,13 @@ def assemble(extracted: pathlib.Path, output_dir: pathlib.Path) -> pathlib.Path:
         )
     )
 
-    result = subprocess.run(["ldid", "-S", str(binary)], capture_output=True, text=True)
+    # 必须用 codesign，不能用 ldid -S：ldid 会重建 LINKEDIT，把共享缓存里带出来的
+    # LC_DYLD_CHAINED_FIXUPS 丢掉，dyld 就没法做指针绑定，dlopen 的瞬间进程就被杀，
+    # 而且不会留下任何崩溃日志。
+    result = subprocess.run(["codesign", "--force", "--sign", "-", str(binary)],
+                            capture_output=True, text=True)
     if result.returncode != 0:
-        sys.exit(f"ldid 重签失败：{result.stderr.strip()}")
+        sys.exit(f"codesign 重签失败：{result.stderr.strip()}")
     return framework
 
 
