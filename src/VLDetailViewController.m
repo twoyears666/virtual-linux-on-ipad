@@ -4,9 +4,12 @@
 
 #import "VLDashedPlaceholderView.h"
 #import "VLDisplayView.h"
+#import "VLFullScreenViewController.h"
 #import "VLHostCapabilities.h"
 #import "VLLinuxVirtualMachine.h"
+#import "VLLog.h"
 #import "VLStartupLog.h"
+#import "VLVMStore.h"
 
 /// iOS 字符 → Linux evdev 按键码（KEY_A = 30 这一套）。
 /// 返回值 0 表示这个字符没有对应按键，直接忽略。
@@ -97,6 +100,10 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 @property (nonatomic, strong) VLDisplayView *displayView;
 /// 藏在界面之外的输入框：只为弹出系统键盘，敲的字都转成按键事件送进客户机。
 @property (nonatomic, strong) UITextField *keyboardField;
+/// 运行时的全屏画面；启动成功后立刻盖上来。
+@property (nonatomic, strong) VLFullScreenViewController *fullScreenController;
+/// 用户自己点过「退出全屏」：别再自动弹回去，等下次启动再说。
+@property (nonatomic, assign) BOOL fullScreenSuppressedByUser;
 
 @end
 
@@ -567,6 +574,8 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 #pragma mark - 设置变更
 
 - (void)notifyChange {
+	// 设置一改就落盘，否则重启 App（以及覆盖安装）后配置就没了。
+	[[VLVMStore sharedStore] save];
 	[self.changeDelegate detailViewControllerDidChangeConfiguration:self];
 }
 
@@ -1032,9 +1041,13 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	}
 
 	if (!self.configuration.isStorageAvailable) {
-		self.statusLabel.text = @"存储不可用：虚拟机已冻结，恢复存放目录后才能启动";
+		[self presentMessage:@"存储不可用"
+					  detail:@"虚拟机已冻结：存放目录不在了（外接盘拔出或目录被删）。恢复目录后才能启动。"];
 		return;
 	}
+
+	// 每次启动都允许重新弹全屏（上次是用户自己退出的）。
+	self.fullScreenSuppressedByUser = NO;
 
 	if (self.virtualMachine == nil) {
 		self.virtualMachine = [[VLLinuxVirtualMachine alloc] initWithConfiguration:self.configuration];
@@ -1043,12 +1056,59 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 
 	NSError *error = nil;
 	if (![self.virtualMachine startWithError:&error]) {
+		[VLStartupLog log:@"启动被拒绝：%@（错误码 %ld）", error.localizedDescription, (long)error.code];
 		self.statusLabel.text = [NSString stringWithFormat:@"启动被拒绝（错误码 %ld）：%@",
 								 (long)error.code, error.localizedDescription];
+		[self presentMessage:@"启动被拒绝"
+					  detail:[NSString stringWithFormat:@"%@（错误码 %ld）\n\n详细信息在日志里：\n%@",
+							  error.localizedDescription, (long)error.code, [VLLog logFilePath]]];
 		return;
 	}
 
 	[self rebuildContent];
+	[self presentFullScreenIfPossible];
+}
+
+/// 启动后直接把虚拟机画面盖满整屏，和 Virtual Mac 一样不再停在设置页。
+- (void)presentFullScreenIfPossible {
+	if (self.virtualMachine == nil || self.presentedViewController != nil) {
+		return;
+	}
+	if (self.fullScreenSuppressedByUser) {
+		return;
+	}
+
+	VLFullScreenViewController *controller =
+		[[VLFullScreenViewController alloc] initWithMachine:self.virtualMachine];
+	__weak typeof(self) weakSelf = self;
+	controller.keyboardRequestHandler = ^{
+		[weakSelf keyboardButtonTapped];
+	};
+	// 用户按「退出全屏」：记住这个选择，之后状态再变化也别把画面盖回去。
+	controller.dismissHandler = ^{
+		weakSelf.fullScreenController = nil;
+		weakSelf.fullScreenSuppressedByUser = YES;
+	};
+	[controller updateStatus:[self machineStatusText]];
+	self.fullScreenController = controller;
+	[self presentViewController:controller animated:YES completion:nil];
+}
+
+- (void)presentMessage:(NSString *)title detail:(NSString *)detail {
+	// 已经有提示在显示就不重复弹，免得两个弹窗叠在一起。
+	if ([self.presentedViewController isKindOfClass:UIAlertController.class]) {
+		return;
+	}
+
+	UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+																  message:detail
+														   preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+											  style:UIAlertActionStyleDefault
+											handler:nil]];
+	// 从当前最上层的界面弹，全屏盖着也看得见。
+	UIViewController *target = self.presentedViewController ?: self;
+	[target presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark - VLLinuxVirtualMachineDelegate
@@ -1061,8 +1121,55 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	}
 	if (state == VLVirtualMachineStateStopped || state == VLVirtualMachineStateFailed) {
 		[self.displayView clearFrame];
+		[self.fullScreenController clearFrame];
 	}
+	if (state == VLVirtualMachineStateStopped) {
+		// 停机了就没必要一直占着整屏，退回设置页。
+		[self dismissFullScreenAnimated];
+	}
+	if (state == VLVirtualMachineStateRunning) {
+		[self presentFullScreenIfPossible];
+	}
+	[self.fullScreenController updateStatus:[self machineStatusText]];
 	[self rebuildContent];
+
+	if (state == VLVirtualMachineStateFailed) {
+		// 后台线程起不来时不会再抛异常，只会走到这里：必须给个可见的提示，不能一闪而过。
+		[self dismissFullScreenAndAlert:[NSString stringWithFormat:@"虚拟机启动失败\n\n%@", message ?: @"未知原因"]];
+	}
+}
+
+- (void)dismissFullScreenAnimated {
+	VLFullScreenViewController *controller = self.fullScreenController;
+	self.fullScreenController = nil;
+	if (controller != nil && controller.presentingViewController != nil) {
+		[controller dismissViewControllerAnimated:YES completion:nil];
+	}
+}
+
+- (void)dismissFullScreenAndAlert:(NSString *)detail {
+	VLFullScreenViewController *controller = self.fullScreenController;
+	self.fullScreenController = nil;
+
+	NSString *message = [detail stringByAppendingFormat:@"\n\n日志：\n%@", [VLLog logFilePath]];
+	void (^showAlert)(void) = ^{
+		// 挪到下一个 runloop：等转场结束再弹，弹窗才不会被系统吞掉。
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self presentMessage:@"虚拟机启动失败" detail:message];
+		});
+	};
+
+	if (controller != nil && controller.presentingViewController != nil) {
+		[controller dismissViewControllerAnimated:YES completion:showAlert];
+	} else if (controller != nil) {
+		// 全屏还在呈现途中：等它落定再关，否则 dismiss 空转、弹窗也弹不出来。
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+					   dispatch_get_main_queue(), ^{
+			[controller dismissViewControllerAnimated:NO completion:showAlert];
+		});
+	} else {
+		showAlert();
+	}
 }
 
 - (void)virtualMachine:(VLLinuxVirtualMachine *)machine
@@ -1076,6 +1183,7 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 		[self rebuildContent];
 	}
 	[self.displayView updateWithWidth:width height:height frame:data];
+	[self.fullScreenController updateFrameWidth:width height:height data:data];
 }
 
 - (void)virtualMachine:(VLLinuxVirtualMachine *)machine didOutputLine:(NSString *)line {

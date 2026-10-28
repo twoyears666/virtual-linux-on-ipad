@@ -3,6 +3,7 @@
 #import <UIKit/UIKit.h>
 
 #import "VLLog.h"
+#import "VLStorageManager.h"
 
 #import <limits.h>
 #import <signal.h>
@@ -14,16 +15,15 @@
 static char VLStartupLogCrashPath[PATH_MAX];
 
 static NSString *VLStartupLogDirectory(void) {
-	NSArray<NSString *> *paths =
-		NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-	NSString *directory = paths.firstObject;
+	// 与 app.log 同一个目录：/var/mobile/Media/VirtualMachines/logs。
+	NSString *directory = [VLLog logsDirectoryPath];
 	if (directory.length == 0) {
 		directory = NSTemporaryDirectory();
 	}
 	return directory;
 }
 
-// 追加一行到 Documents/<fileName>。写日志本身失败不能影响主流程。
+// 追加一行到 <虚拟机目录>/logs/<fileName>。写日志本身失败不能影响主流程。
 static void VLStartupLogAppend(NSString *fileName, NSString *line) {
 	NSString *path = [VLStartupLogDirectory() stringByAppendingPathComponent:fileName];
 

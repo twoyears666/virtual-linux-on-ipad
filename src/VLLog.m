@@ -12,22 +12,17 @@ static const unsigned long long VLLogMaximumBytes = 512ULL * 1024ULL;
 
 @implementation VLLog
 
-+ (NSString *)documentsFilePathForName:(NSString *)name {
-	NSString *documents =
-		[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-	if (documents.length == 0) {
-		documents = NSTemporaryDirectory();
-	}
-	return [documents stringByAppendingPathComponent:name];
-}
-
 + (NSString *)logsDirectoryPath {
-	NSString *documents =
-		[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-	if (documents.length == 0) {
-		documents = NSTemporaryDirectory();
+	// 日志跟着虚拟机目录走（/var/mobile/Media/VirtualMachines/logs），
+	// 这样卸载重装、换签名都不会把排查现场一起删掉。
+	NSString *root = VLStorageManager.sharedManager.defaultLocation.path;
+	if (root.length == 0) {
+		root = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+		if (root.length == 0) {
+			root = NSTemporaryDirectory();
+		}
 	}
-	NSString *directory = [documents stringByAppendingPathComponent:VLLogFolderName];
+	NSString *directory = [root stringByAppendingPathComponent:VLLogFolderName];
 	[NSFileManager.defaultManager createDirectoryAtPath:directory
 							withIntermediateDirectories:YES
 											 attributes:nil
@@ -130,8 +125,8 @@ static const unsigned long long VLLogMaximumBytes = 512ULL * 1024ULL;
 	NSArray<NSArray<NSString *> *> *appended = @[
 		@[ @"统一日志", [self logFilePath] ],
 		@[ @"统一日志（上一次轮转）", [[self logsDirectoryPath] stringByAppendingPathComponent:@"app.1.log"] ],
-		@[ @"启动埋点", [self documentsFilePathForName:@"startup.log"] ],
-		@[ @"崩溃记录", [self documentsFilePathForName:@"crash.txt"] ],
+		@[ @"启动埋点", [[self logsDirectoryPath] stringByAppendingPathComponent:@"startup.log"] ],
+		@[ @"崩溃记录", [[self logsDirectoryPath] stringByAppendingPathComponent:@"crash.txt"] ],
 	];
 
 	for (NSArray<NSString *> *entry in appended) {

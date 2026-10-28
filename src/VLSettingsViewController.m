@@ -142,7 +142,12 @@ typedef NS_ENUM(NSInteger, VLSettingsSection) {
 			NSString *logPath = [VLLog logFilePath];
 			NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:logPath error:NULL];
 			unsigned long long size = [attributes[NSFileSize] unsignedLongLongValue];
-			cell.detailTextLabel.text = [NSString stringWithFormat:@"Documents/logs/app.log · %.1f KB",
+			// 显示去掉 /var/mobile 前缀后的路径，一眼能对上「文件」App 里的 Media 目录。
+			NSString *displayPath = [logPath hasPrefix:@"/var/mobile/"]
+				? [logPath substringFromIndex:@"/var/mobile/".length]
+				: logPath;
+			cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · %.1f KB",
+										  displayPath,
 										  (double)size / 1024.0];
 			cell.textLabel.textColor = UIColor.systemBlueColor;
 			break;
@@ -264,7 +269,8 @@ typedef NS_ENUM(NSInteger, VLSettingsSection) {
 	if (reportURL == nil) {
 		UIAlertController *alert =
 			[UIAlertController alertControllerWithTitle:@"导出失败"
-												message:@"日志文件写不出来，可以到 Documents/logs 里手动取。"
+												message:[NSString stringWithFormat:@"日志文件写不出来，可以到「文件」App 的 Media 目录下找：%@",
+																				   [VLLog logsDirectoryPath]]
 										 preferredStyle:UIAlertControllerStyleAlert];
 		[alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
 		[self presentViewController:alert animated:YES completion:nil];
