@@ -6,85 +6,13 @@
 #import "VLDisplayView.h"
 #import "VLFullScreenViewController.h"
 #import "VLHostCapabilities.h"
+#import "VLKeyboardInput.h"
 #import "VLLinuxVirtualMachine.h"
 #import "VLLog.h"
 #import "VLStartupLog.h"
 #import "VLVMStore.h"
 
-/// iOS 字符 → Linux evdev 按键码（KEY_A = 30 这一套）。
-/// 返回值 0 表示这个字符没有对应按键，直接忽略。
-static const uint16_t VLLowercaseKeycodes[26] = {
-	30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
-	49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,
-};
-
-static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
-	if (needsShift != NULL) {
-		*needsShift = NO;
-	}
-	if (character >= 'a' && character <= 'z') {
-		return VLLowercaseKeycodes[character - 'a'];
-	}
-	if (character >= 'A' && character <= 'Z') {
-		if (needsShift != NULL) {
-			*needsShift = YES;
-		}
-		return VLLowercaseKeycodes[character - 'A'];
-	}
-	if (character >= '1' && character <= '9') {
-		return (uint16_t)(character - '1' + 2);
-	}
-	if (character == '0') {
-		return 11;
-	}
-	if (character == ' ') {
-		return 57;
-	}
-	if (character == '\n' || character == '\r') {
-		return 28;
-	}
-	if (character == '\t') {
-		return 15;
-	}
-	switch (character) {
-		case '-': return 12;
-		case '=': return 13;
-		case '[': return 26;
-		case ']': return 27;
-		case ';': return 39;
-		case '\'': return 40;
-		case '`': return 41;
-		case '\\': return 43;
-		case ',': return 51;
-		case '.': return 52;
-		case '/': return 53;
-		// 下面这些是按住 Shift 才打出来的符号。
-		case '!': if (needsShift != NULL) { *needsShift = YES; } return 2;
-		case '@': if (needsShift != NULL) { *needsShift = YES; } return 3;
-		case '#': if (needsShift != NULL) { *needsShift = YES; } return 4;
-		case '$': if (needsShift != NULL) { *needsShift = YES; } return 5;
-		case '%': if (needsShift != NULL) { *needsShift = YES; } return 6;
-		case '^': if (needsShift != NULL) { *needsShift = YES; } return 7;
-		case '&': if (needsShift != NULL) { *needsShift = YES; } return 8;
-		case '*': if (needsShift != NULL) { *needsShift = YES; } return 9;
-		case '(': if (needsShift != NULL) { *needsShift = YES; } return 10;
-		case ')': if (needsShift != NULL) { *needsShift = YES; } return 11;
-		case '_': if (needsShift != NULL) { *needsShift = YES; } return 12;
-		case '+': if (needsShift != NULL) { *needsShift = YES; } return 13;
-		case '{': if (needsShift != NULL) { *needsShift = YES; } return 26;
-		case '}': if (needsShift != NULL) { *needsShift = YES; } return 27;
-		case ':': if (needsShift != NULL) { *needsShift = YES; } return 39;
-		case '"': if (needsShift != NULL) { *needsShift = YES; } return 40;
-		case '~': if (needsShift != NULL) { *needsShift = YES; } return 41;
-		case '|': if (needsShift != NULL) { *needsShift = YES; } return 43;
-		case '<': if (needsShift != NULL) { *needsShift = YES; } return 51;
-		case '>': if (needsShift != NULL) { *needsShift = YES; } return 52;
-		case '?': if (needsShift != NULL) { *needsShift = YES; } return 53;
-	}
-	return 0;
-}
-
-@interface VLDetailViewController () <VLLinuxVirtualMachineDelegate, UITextFieldDelegate>
+@interface VLDetailViewController () <VLLinuxVirtualMachineDelegate>
 
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *stackView;
@@ -98,9 +26,9 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 
 @property (nonatomic, strong) VLLinuxVirtualMachine *virtualMachine;
 @property (nonatomic, strong) VLDisplayView *displayView;
-/// 藏在界面之外的输入框：只为弹出系统键盘，敲的字都转成按键事件送进客户机。
-@property (nonatomic, strong) UITextField *keyboardField;
-/// 运行时的全屏画面；启动成功后立刻盖上来。
+/// 系统键盘 → 客户机按键；输入框挂在当前显示的页面上。
+@property (nonatomic, strong) VLKeyboardInput *keyboardInput;
+/// 运行时的独立全屏页面；启动成功后立刻切过去。
 @property (nonatomic, strong) VLFullScreenViewController *fullScreenController;
 /// 用户自己点过「退出全屏」：别再自动弹回去，等下次启动再说。
 @property (nonatomic, assign) BOOL fullScreenSuppressedByUser;
@@ -927,108 +855,18 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 
 #pragma mark - 键盘输入
 
-- (UITextField *)keyboardField {
-	if (_keyboardField == nil) {
-		UITextField *field = [[UITextField alloc] init];
-		field.delegate = self;
-		field.autocorrectionType = UITextAutocorrectionTypeNo;
-		field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-		field.spellCheckingType = UITextSpellCheckingTypeNo;
-		field.keyboardType = UIKeyboardTypeASCIICapable;
-		field.inputAccessoryView = [self keyboardAccessoryView];
-		// 必须留在视图层级里才能成为第一响应者，但不要被看见。
-		field.frame = CGRectMake(0.0, 0.0, 1.0, 1.0);
-		field.alpha = 0.01;
-		field.text = @"";
-		[self.view addSubview:field];
-		_keyboardField = field;
+- (VLKeyboardInput *)keyboardInput {
+	if (_keyboardInput == nil) {
+		_keyboardInput = [[VLKeyboardInput alloc] initWithMachine:self.virtualMachine];
 	}
-	return _keyboardField;
-}
-
-- (UIView *)keyboardAccessoryView {
-	UIToolbar *toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0.0, 0.0, 0.0, 44.0)];
-	NSArray<NSArray *> *specs = @[
-		@[ @"Esc", @1 ], @[ @"Tab", @15 ],
-		@[ @"←", @105 ], @[ @"↑", @103 ], @[ @"↓", @108 ], @[ @"→", @106 ],
-		@[ @"回车", @28 ],
-	];
-	NSMutableArray<UIBarButtonItem *> *items = [NSMutableArray array];
-	for (NSArray *spec in specs) {
-		UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithTitle:spec[0]
-																 style:UIBarButtonItemStylePlain
-																target:self
-																action:@selector(accessoryKeyTapped:)];
-		item.tag = [spec[1] integerValue];
-		[items addObject:item];
-	}
-	toolbar.items = items;
-	[toolbar sizeToFit];
-	return toolbar;
+	return _keyboardInput;
 }
 
 - (void)keyboardButtonTapped {
-	[self.keyboardField becomeFirstResponder];
-}
-
-- (void)accessoryKeyTapped:(UIBarButtonItem *)sender {
-	[self sendKeycode:(uint16_t)sender.tag];
-	// 按完工具条按钮键盘会想收起，这里把焦点抢回来。
-	[self.keyboardField becomeFirstResponder];
-}
-
-- (void)sendKeycode:(uint16_t)keycode {
-	if (keycode == 0) {
-		return;
-	}
-	VLLinuxVirtualMachine *machine = self.virtualMachine;
-	[machine sendKeycode:keycode pressed:YES];
-	[machine sendKeycode:keycode pressed:NO];
-}
-
-- (void)sendCharacter:(unichar)character {
-	BOOL needsShift = NO;
-	uint16_t keycode = VLKeycodeForCharacter(character, &needsShift);
-	if (keycode == 0) {
-		return;
-	}
-	VLLinuxVirtualMachine *machine = self.virtualMachine;
-	if (needsShift) {
-		[machine sendKeycode:42 pressed:YES];
-	}
-	[machine sendKeycode:keycode pressed:YES];
-	[machine sendKeycode:keycode pressed:NO];
-	if (needsShift) {
-		[machine sendKeycode:42 pressed:NO];
-	}
-}
-
-- (BOOL)textField:(UITextField *)textField
-	shouldChangeCharactersInRange:(NSRange)range
-				replacementString:(NSString *)string {
-	if (textField != _keyboardField) {
-		return YES;
-	}
-	if (string.length == 0) {
-		// 系统键盘的退格键表现为「替换成空串」。
-		[self sendKeycode:14];
-		return NO;
-	}
-	for (NSUInteger index = 0; index < string.length; index++) {
-		[self sendCharacter:[string characterAtIndex:index]];
-	}
-	// 输入框只当管道用，不留文字。
-	textField.text = @"";
-	return NO;
-}
-
-- (BOOL)textFieldShouldReturn:(UITextField *)textField {
-	if (textField != _keyboardField) {
-		return YES;
-	}
-	[self sendKeycode:28];
-	textField.text = @"";
-	return NO;
+	// 换过机器就跟着换目标；输入框挂在当前这一页上。
+	self.keyboardInput.machine = self.virtualMachine;
+	[self.keyboardInput attachToView:self.view];
+	[self.keyboardInput show];
 }
 
 #pragma mark - 启动
@@ -1069,7 +907,8 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	[self presentFullScreenIfPossible];
 }
 
-/// 启动后直接把虚拟机画面盖满整屏，和 Virtual Mac 一样不再停在设置页。
+/// 启动后直接切到客户机的独立全屏页面，和 Virtual Mac 一样不再停在设置页。
+/// 不做转场动画：这里是「换页」，不是弹一张卡片上来。
 - (void)presentFullScreenIfPossible {
 	if (self.virtualMachine == nil || self.presentedViewController != nil) {
 		return;
@@ -1081,17 +920,14 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	VLFullScreenViewController *controller =
 		[[VLFullScreenViewController alloc] initWithMachine:self.virtualMachine];
 	__weak typeof(self) weakSelf = self;
-	controller.keyboardRequestHandler = ^{
-		[weakSelf keyboardButtonTapped];
-	};
-	// 用户按「退出全屏」：记住这个选择，之后状态再变化也别把画面盖回去。
+	// 用户按「退出」：记住这个选择，之后状态再变化也别把页面盖回来。
 	controller.dismissHandler = ^{
 		weakSelf.fullScreenController = nil;
 		weakSelf.fullScreenSuppressedByUser = YES;
 	};
 	[controller updateStatus:[self machineStatusText]];
 	self.fullScreenController = controller;
-	[self presentViewController:controller animated:YES completion:nil];
+	[self presentViewController:controller animated:NO completion:nil];
 }
 
 - (void)presentMessage:(NSString *)title detail:(NSString *)detail {
@@ -1125,7 +961,7 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	}
 	if (state == VLVirtualMachineStateStopped) {
 		// 停机了就没必要一直占着整屏，退回设置页。
-		[self dismissFullScreenAnimated];
+		[self dismissFullScreen];
 	}
 	if (state == VLVirtualMachineStateRunning) {
 		[self presentFullScreenIfPossible];
@@ -1139,11 +975,11 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	}
 }
 
-- (void)dismissFullScreenAnimated {
+- (void)dismissFullScreen {
 	VLFullScreenViewController *controller = self.fullScreenController;
 	self.fullScreenController = nil;
 	if (controller != nil && controller.presentingViewController != nil) {
-		[controller dismissViewControllerAnimated:YES completion:nil];
+		[controller dismissViewControllerAnimated:NO completion:nil];
 	}
 }
 
@@ -1160,7 +996,7 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	};
 
 	if (controller != nil && controller.presentingViewController != nil) {
-		[controller dismissViewControllerAnimated:YES completion:showAlert];
+		[controller dismissViewControllerAnimated:NO completion:showAlert];
 	} else if (controller != nil) {
 		// 全屏还在呈现途中：等它落定再关，否则 dismiss 空转、弹窗也弹不出来。
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
@@ -1190,6 +1026,9 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	if (machine != self.virtualMachine) {
 		return;
 	}
+	// 全屏页面里没有画面时显示的就是这串启动日志，别让它只停留在设置页。
+	[self.fullScreenController appendConsoleLine:line];
+
 	NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
 	if (trimmed.length == 0 || self.statusLabel == nil) {
 		return;

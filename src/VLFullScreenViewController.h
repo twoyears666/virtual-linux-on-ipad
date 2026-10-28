@@ -4,14 +4,11 @@
 
 @class VLLinuxVirtualMachine;
 
-/// 全屏运行客户机：整屏黑底，画面恒定 4:3 居中。
-/// 台前调度把窗口缩小、或屏幕本身不是 4:3 时，多余的地方留黑边，不做拉伸。
+/// 客户机的独立全屏页面：整屏就是画面，状态和串口输出只作为叠加提示。
+/// 和 Virtual Mac 一样，启动后离开设置页直接进这里。
 @interface VLFullScreenViewController : UIViewController
 
 - (instancetype)initWithMachine:(VLLinuxVirtualMachine *)machine;
-
-/// 点「键盘」时回调出去：系统键盘和按键翻译都在详情页那边，这里不重复实现。
-@property (nonatomic, copy) void (^keyboardRequestHandler)(void);
 
 /// 用户主动退出全屏时回调，详情页据此记住「别再自动弹回来」。
 /// 注意：程序自己 dismiss（例如虚拟机停止）不会触发它。
@@ -20,5 +17,8 @@
 - (void)updateStatus:(NSString *)status;
 - (void)updateFrameWidth:(uint32_t)width height:(uint32_t)height data:(NSData *)data;
 - (void)clearFrame;
+
+/// 追加一行客户机串口输出。没有画面时，内核启动日志就是这页真正能看到的内容。
+- (void)appendConsoleLine:(NSString *)line;
 
 @end
