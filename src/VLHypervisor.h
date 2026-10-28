@@ -17,7 +17,11 @@ typedef struct {
 	union {
 		struct {
 			uint64_t syndrome;
+			/// FAR_EL1：出错时客户机用的虚拟地址。
 			uint64_t virtualAddress;
+			/// FAR_EL2：同一次访问在第二阶段（物理）看到的目标地址。只有数据异常有效；
+			/// 内核开了 MMU 之后设备访问必须靠它定位，拿虚拟地址是找不到设备的。
+			uint64_t physicalAddress;
 		} exception;
 		struct {
 			uint32_t vtimerIRQ;

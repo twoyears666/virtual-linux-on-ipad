@@ -7,6 +7,7 @@ static const uint32_t VLPL011FlagsIdle = 0x90;
 
 @implementation VLPL011Serial {
 	NSMutableString *_lineBuffer;
+	NSUInteger _writtenCharacterCount;
 }
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress {
@@ -33,6 +34,7 @@ static const uint32_t VLPL011FlagsIdle = 0x90;
 	}
 	// 只取最低字节，其余当控制寄存器写入忽略。
 	uint8_t character = (uint8_t)(value & 0xFF);
+	_writtenCharacterCount++;
 	if (character == '\r') {
 		return;
 	}

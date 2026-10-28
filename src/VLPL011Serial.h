@@ -14,4 +14,8 @@
 /// 每凑满一行回调一次（带上换行符）。
 @property (nonatomic, copy) void (^textHandler)(NSString *line);
 
+/// 客户机往数据寄存器写了多少个字符。用来判断内核到底有没有走到串口初始化，
+/// 零就说明它死在更早的地方。
+@property (nonatomic, readonly) NSUInteger writtenCharacterCount;
+
 @end

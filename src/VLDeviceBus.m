@@ -32,6 +32,10 @@
 	return nil;
 }
 
+- (BOOL)containsAddress:(uint64_t)address {
+	return [self deviceForAddress:address offset:NULL] != nil;
+}
+
 - (BOOL)readAddress:(uint64_t)address width:(uint32_t)width value:(uint32_t *)value {
 	uint32_t offset = 0;
 	id<VLDevice> device = [self deviceForAddress:address offset:&offset];

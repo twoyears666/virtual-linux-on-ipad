@@ -37,13 +37,14 @@ static const uint64_t VLInputBase = 0x0C000000;
 static const uint64_t VLNetBase = 0x0D000000;
 static const uint64_t VLISOBase = 0x0E000000;
 
-// GIC 中断号：SPI 从 32 开始，PPI 27 是 EL1 虚拟定时器
+// GIC 中断号：SPI 从 32 开始。PPI 编号按 arm64 的约定（设备树里 timer 节点写的是
+// 13/14/11/10），EL1 虚拟定时器是 PPI 11——27 是 32 位 ARM 的编号，在 arm64 上没用。
 static const uint32_t VLGPUInterrupt = 34;
 static const uint32_t VLBlockInterrupt = 35;
 static const uint32_t VLInputInterrupt = 36;
 static const uint32_t VLNetInterrupt = 37;
 static const uint32_t VLISOInterrupt = 38;
-static const uint32_t VLPPIVirtualTimer = 27;
+static const uint32_t VLPPIVirtualTimer = 11;
 
 /// HVC 调用（PSCI）里的功能号
 #define VL_PSCI_VERSION 0x84000000ULL
@@ -96,6 +97,11 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	/// 系统寄存器陷入的累计次数与已记录过的编码；只用来限制日志条数。
 	NSUInteger _systemRegisterTrapCount;
 	NSMutableSet<NSNumber *> *_trappedSystemRegisters;
+	/// MMIO 访问的累计次数；第一次要留一行日志证明设备真的被访问到了。
+	NSUInteger _mmioAccessCount;
+	/// 没对上任何设备的访问次数，以及已经记过日志的地址（去重后限 16 条）。
+	NSUInteger _unmappedAccessCount;
+	NSMutableSet<NSNumber *> *_loggedUnmappedAddresses;
 
 	/// 每个 vCPU 一份。0 号核跑在 runVirtualMachine 的线程上，其余各自一个线程。
 	VLVCPUSlot _slots[VLMaximumCPUs];
@@ -159,6 +165,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_inputServicePending = NO;
 	_systemRegisterTrapCount = 0;
 	_trappedSystemRegisters = [NSMutableSet set];
+	_mmioAccessCount = 0;
+	_unmappedAccessCount = 0;
+	_loggedUnmappedAddresses = [NSMutableSet set];
 	[_startCondition lock];
 	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
 		memset(&_slots[index], 0, sizeof(VLVCPUSlot));
@@ -676,11 +685,16 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 				uint64_t faultAddress = reason == VLHypervisorExitReasonException
 					? exitInfo->info.exception.virtualAddress
 					: 0;
+				uint64_t faultPhysical = reason == VLHypervisorExitReasonException
+					? exitInfo->info.exception.physicalAddress
+					: 0;
 				uint64_t cpsr = 0;
 				[_hypervisor getRegister:VLHypervisorRegisterCPSR value:&cpsr forVCPU:vcpu];
-				[VLStartupLog log:@"vCPU 首次退出：原因=%u PC=0x%llx ESR=0x%llx FAR=0x%llx CPSR=0x%llx",
+				[VLStartupLog log:@"vCPU 首次退出：原因=%u PC=0x%llx ESR=0x%llx FAR=0x%llx "
+								   @"IPA=0x%llx CPSR=0x%llx",
 				 reason, (unsigned long long)pc, (unsigned long long)syndrome,
-				 (unsigned long long)faultAddress, (unsigned long long)cpsr];
+				 (unsigned long long)faultAddress, (unsigned long long)faultPhysical,
+				 (unsigned long long)cpsr];
 			}
 			if (reason == VLHypervisorExitReasonCanceled) {
 				continue;
@@ -722,7 +736,11 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	uint32_t exceptionClass = (uint32_t)((syndrome >> 26) & 0x3F);
 
 	if (exceptionClass == 0x24 || exceptionClass == 0x25) {
-		return [self handleDataAbortSyndrome:syndrome address:address cpu:cpuIndex vcpu:vcpu];
+		return [self handleDataAbortSyndrome:syndrome
+							 virtualAddress:exitInfo->info.exception.virtualAddress
+							physicalAddress:exitInfo->info.exception.physicalAddress
+										cpu:cpuIndex
+									   vcpu:vcpu];
 	}
 	if (exceptionClass == 0x01) {
 		// WFI/WFE 陷入：客户机在等中断。让出一点 CPU 再往前走，避免空转刷满。
@@ -747,6 +765,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	uint64_t pc = 0;
 	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+	[self logProcessorSnapshotForCPU:cpuIndex vcpu:vcpu pc:pc];
 	[self reportFailure:[NSString stringWithFormat:@"未处理的异常 EC=0x%x ESR=0x%llx FAR=0x%llx PC=0x%llx",
 						 exceptionClass, (unsigned long long)syndrome,
 						 (unsigned long long)address, (unsigned long long)pc]];
@@ -856,18 +875,30 @@ static uint64_t VLGuestCounterValue(void) {
 }
 
 - (BOOL)handleDataAbortSyndrome:(uint64_t)syndrome
-						address:(uint64_t)address
+				 virtualAddress:(uint64_t)virtualAddress
+				physicalAddress:(uint64_t)physicalAddress
 							cpu:(NSUInteger)cpuIndex
 						   vcpu:(uint64_t)vcpu {
-	BOOL instructionValid = ((syndrome >> 24) & 0x1) != 0;
 	uint64_t pc = 0;
 	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+	// 设备要按物理地址找：内核开了 MMU 之后访问设备用的是 ioremap 出来的虚拟地址，
+	// 拿它当设备地址永远对不上（这就是以前「未实现的 MMIO」的真正原因）。
+	uint64_t address = [self deviceAddressForVirtualAddress:virtualAddress
+											 physicalAddress:physicalAddress];
+
+	BOOL instructionValid = ((syndrome >> 24) & 0x1) != 0;
 	if (!instructionValid) {
-		[self reportFailure:[NSString stringWithFormat:
-			@"MMIO 访问无法解码：地址 0x%llx，核 %lu，PC=0x%llx，ESR=0x%llx",
-			(unsigned long long)address, (unsigned long)cpuIndex,
-			(unsigned long long)pc, (unsigned long long)syndrome]];
-		return NO;
+		// 解码不出是哪条指令也不能把整台机停掉：记一次、跳过它，其余核还能继续跑。
+		[self noteUnmappedAccess:address
+							width:0
+						  isWrite:NO
+							   pc:pc
+							  cpu:cpuIndex
+							 vcpu:vcpu
+				   virtualAddress:virtualAddress
+				  physicalAddress:physicalAddress];
+		[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
+		return YES;
 	}
 
 	uint32_t widthCode = (uint32_t)((syndrome >> 22) & 0x3);
@@ -891,18 +922,125 @@ static uint64_t VLGuestCounterValue(void) {
 	}
 	[_deviceLock unlock];
 
+	if (_mmioAccessCount == 0) {
+		// 只记第一次：既证明设备真的被访问到了，也不会把日志刷满。
+		[VLStartupLog log:@"首个 MMIO 访问：设备地址 0x%llx（虚拟地址 0x%llx，物理地址 0x%llx）"
+						   @"%u 字节%@，%@",
+		 (unsigned long long)address, (unsigned long long)virtualAddress,
+		 (unsigned long long)physicalAddress, width, isWrite ? @"写" : @"读",
+		 handled ? @"已命中设备" : @"没有对应设备"];
+	}
+	_mmioAccessCount++;
+
 	if (!handled) {
-		// 带上 PC 和核号：访问落在所有设备区间之外，照着 PC 能直接定位是哪条指令在读哪个地址。
-		[self reportFailure:[NSString stringWithFormat:
-			@"访问了未实现的 MMIO 地址 0x%llx（%u 字节%@），核 %lu，PC=0x%llx，ESR=0x%llx",
-			(unsigned long long)address, width, isWrite ? @"写" : @"读",
-			(unsigned long)cpuIndex, (unsigned long long)pc, (unsigned long long)syndrome]];
-		return NO;
+		// 没对上设备不再当成致命错误：小毛病就停下整台机，代价太大。
+		// 记一次（去重、限 16 条）+ 打一份处理器快照，然后当读 0 / 写丢弃继续跑。
+		[self noteUnmappedAccess:address
+							width:width
+						  isWrite:isWrite
+							   pc:pc
+							  cpu:cpuIndex
+							 vcpu:vcpu
+				   virtualAddress:virtualAddress
+				  physicalAddress:physicalAddress];
+		if (!isWrite) {
+			[_hypervisor setRegister:registerIndex value:0 forVCPU:vcpu];
+		}
 	}
 
 	// 虚拟机停在触发异常的那条指令上，模拟完要自己往前推一条，否则会反复触发。
 	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 	return YES;
+}
+
+/// 设备地址的选择：物理地址落在已知区间（内存或某个设备）就信它；否则退回虚拟地址
+/// （内核早期 MMU 还没开时，两者本来就是同一个值）。
+- (uint64_t)deviceAddressForVirtualAddress:(uint64_t)virtualAddress
+						   physicalAddress:(uint64_t)physicalAddress {
+	if ([self isKnownGuestAddress:physicalAddress]) {
+		return physicalAddress;
+	}
+	if ([self isKnownGuestAddress:virtualAddress]) {
+		return virtualAddress;
+	}
+	return physicalAddress != 0 ? physicalAddress : virtualAddress;
+}
+
+- (BOOL)isKnownGuestAddress:(uint64_t)address {
+	if (address >= VLGuestMemoryBase && address - VLGuestMemoryBase < _guestMemorySize) {
+		return YES;
+	}
+	return [_deviceBus containsAddress:address];
+}
+
+/// 记录一次「没对上设备」的访问，并在第一次遇到某个地址时打一份快照。
+- (void)noteUnmappedAccess:(uint64_t)address
+					 width:(uint32_t)width
+				   isWrite:(BOOL)isWrite
+						pc:(uint64_t)pc
+					   cpu:(NSUInteger)cpuIndex
+					  vcpu:(uint64_t)vcpu
+			virtualAddress:(uint64_t)virtualAddress
+		   physicalAddress:(uint64_t)physicalAddress {
+	_unmappedAccessCount++;
+	NSNumber *addressBox = @(address);
+	if ([_loggedUnmappedAddresses containsObject:addressBox] ||
+		_loggedUnmappedAddresses.count >= 16) {
+		return;
+	}
+	[_loggedUnmappedAddresses addObject:addressBox];
+	if (width == 0) {
+		[VLStartupLog log:@"客户机访问了没有设备的地址 0x%llx（指令无法解码，虚拟地址 0x%llx，"
+						   @"物理地址 0x%llx），核 %lu，PC=0x%llx，已跳过（累计 %lu 次）",
+		 (unsigned long long)address, (unsigned long long)virtualAddress,
+		 (unsigned long long)physicalAddress, (unsigned long)cpuIndex,
+		 (unsigned long long)pc, (unsigned long)_unmappedAccessCount];
+	} else {
+		[VLStartupLog log:@"客户机访问了没有设备的地址 0x%llx（%u 字节%@，虚拟地址 0x%llx，"
+						   @"物理地址 0x%llx），核 %lu，PC=0x%llx，已按忽略处理（累计 %lu 次）",
+		 (unsigned long long)address, width, isWrite ? @"写" : @"读",
+		 (unsigned long long)virtualAddress, (unsigned long long)physicalAddress,
+		 (unsigned long)cpuIndex, (unsigned long long)pc,
+		 (unsigned long)_unmappedAccessCount];
+	}
+	[self logProcessorSnapshotForCPU:cpuIndex vcpu:vcpu pc:pc];
+}
+
+/// 打一份客户机处理器快照：通用寄存器 + PC 处那条指令的机器码。
+/// 内核是线性装载在 0x80080000 的，PC 的低 32 位就是镜像内的偏移，所以只要拿到
+/// 这 4 个字节，就能反汇编出到底哪条指令在访问坏地址。
+- (void)logProcessorSnapshotForCPU:(NSUInteger)cpuIndex vcpu:(uint64_t)vcpu pc:(uint64_t)pc {
+	uint64_t registers[31] = { 0 };
+	for (uint32_t index = 0; index < 31; index++) {
+		[_hypervisor getRegister:index value:&registers[index] forVCPU:vcpu];
+	}
+	uint64_t cpsr = 0;
+	[_hypervisor getRegister:VLHypervisorRegisterCPSR value:&cpsr forVCPU:vcpu];
+	NSUInteger serialCharacters = [_serial writtenCharacterCount];
+	[VLStartupLog log:@"客户机快照：核 %lu PC=0x%llx CPSR=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx "
+					   @"x3=0x%llx x4=0x%llx x29=0x%llx x30=0x%llx，串口已输出 %lu 个字符",
+	 (unsigned long)cpuIndex, (unsigned long long)pc, (unsigned long long)cpsr,
+	 (unsigned long long)registers[0], (unsigned long long)registers[1],
+	 (unsigned long long)registers[2], (unsigned long long)registers[3],
+	 (unsigned long long)registers[4], (unsigned long long)registers[29],
+	 (unsigned long long)registers[30], (unsigned long)serialCharacters];
+
+	uint64_t candidates[3] = {
+		pc & 0xFFFFFFFFu,
+		pc - 0xFFFF800000000000ULL,
+		pc - 0xFFFF000000000000ULL,
+	};
+	for (NSUInteger index = 0; index < 3; index++) {
+		const uint8_t *code = [_guestMemory hostPointerForGuestAddress:candidates[index] length:16];
+		if (code == NULL) {
+			continue;
+		}
+		[VLStartupLog log:@"PC 处指令（按 0x%llx 读）：%02x %02x %02x %02x  %02x %02x %02x %02x  "
+						   @"%02x %02x %02x %02x  %02x %02x %02x %02x",
+		 (unsigned long long)candidates[index],
+		 code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7],
+		 code[8], code[9], code[10], code[11], code[12], code[13], code[14], code[15]];
+	}
 }
 
 - (BOOL)writeValue:(uint64_t)value width:(uint32_t)width address:(uint64_t)address {
