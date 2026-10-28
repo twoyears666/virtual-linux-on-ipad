@@ -48,7 +48,9 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 						   blockBase:(uint64_t)blockBase
 							 isoBase:(uint64_t)isoBase
 						   inputBase:(uint64_t)inputBase
-							 netBase:(uint64_t)netBase {
+							 netBase:(uint64_t)netBase
+						hasBlockDisk:(BOOL)hasBlockDisk
+						   hasISODisc:(BOOL)hasISODisc {
 	VLDeviceTree *builder = [[VLDeviceTree alloc] init];
 	return [builder buildWithMemoryBase:memoryBase
 							 memorySize:memorySize
@@ -62,7 +64,9 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 							  blockBase:blockBase
 								isoBase:isoBase
 							  inputBase:inputBase
-								netBase:netBase];
+								netBase:netBase
+						   hasBlockDisk:hasBlockDisk
+							  hasISODisc:hasISODisc];
 }
 
 - (instancetype)init {
@@ -89,7 +93,9 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					  blockBase:(uint64_t)blockBase
 						isoBase:(uint64_t)isoBase
 					  inputBase:(uint64_t)inputBase
-						netBase:(uint64_t)netBase {
+						netBase:(uint64_t)netBase
+				   hasBlockDisk:(BOOL)hasBlockDisk
+					  hasISODisc:(BOOL)hasISODisc {
 	NSUInteger cores = MAX((NSUInteger)1, MIN(cpuCount, VLFDTMaximumCPUs));
 
 	[self beginNode:@""];
@@ -146,8 +152,8 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"always-on" bytes:[NSData data]];
 	[self endNode];
 
-	// GICv2：分发器 4 KB + 每核一份 8 KB 的 CPU 接口
-	uint32_t cpuInterfaceSize = (uint32_t)cores * 0x2000;
+	// GICv2：分发器 4 KB + CPU 接口 8 KB。CPU 接口是各核共用的同一个地址窗口
+	// （寄存器按核 banking），所以这里固定 0x2000，与核数无关。
 	[self beginNode:[NSString stringWithFormat:@"interrupt-controller@%llx", (unsigned long long)gicBase]];
 	[self propertyNamed:@"compatible" string:@"arm,cortex-a15-gic"];
 	[self propertyNamed:@"#interrupt-cells" cells:@[ @3 ]];
@@ -156,7 +162,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 				   cells:@[
 					   @((uint32_t)(gicBase >> 32)), @((uint32_t)(gicBase & 0xFFFFFFFF)), @0x1000, @0,
 					   @((uint32_t)((gicBase + 0x1000) >> 32)), @((uint32_t)((gicBase + 0x1000) & 0xFFFFFFFF)),
-					   @(cpuInterfaceSize), @0,
+					   @0x2000, @0,
 				   ]];
 	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleInterruptController) ]];
 	[self endNode];
@@ -182,15 +188,17 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"interrupts" cells:@[ @0, @2, @4 ]];
 	[self endNode];
 
-	// virtio-blk：SPI 3
-	[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)blockBase]];
-	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
-	[self propertyNamed:@"reg"
-				   cells:@[
-					   @((uint32_t)(blockBase >> 32)), @((uint32_t)(blockBase & 0xFFFFFFFF)), @0x1000, @0,
-				   ]];
-	[self propertyNamed:@"interrupts" cells:@[ @0, @3, @4 ]];
-	[self endNode];
+	// virtio-blk：SPI 3（没挂系统盘就不声明，否则内核探测会撞空地址）
+	if (hasBlockDisk) {
+		[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)blockBase]];
+		[self propertyNamed:@"compatible" string:@"virtio,mmio"];
+		[self propertyNamed:@"reg"
+					   cells:@[
+						   @((uint32_t)(blockBase >> 32)), @((uint32_t)(blockBase & 0xFFFFFFFF)), @0x1000, @0,
+					   ]];
+		[self propertyNamed:@"interrupts" cells:@[ @0, @3, @4 ]];
+		[self endNode];
+	}
 
 	// virtio-input：SPI 4
 	[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)inputBase]];
@@ -212,15 +220,17 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"interrupts" cells:@[ @0, @5, @4 ]];
 	[self endNode];
 
-	// 安装镜像（只读光驱）：SPI 6
-	[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)isoBase]];
-	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
-	[self propertyNamed:@"reg"
-				   cells:@[
-					   @((uint32_t)(isoBase >> 32)), @((uint32_t)(isoBase & 0xFFFFFFFF)), @0x1000, @0,
-				   ]];
-	[self propertyNamed:@"interrupts" cells:@[ @0, @6, @4 ]];
-	[self endNode];
+	// 安装镜像（只读光驱）：SPI 6（没选 ISO 就不声明）
+	if (hasISODisc) {
+		[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx", (unsigned long long)isoBase]];
+		[self propertyNamed:@"compatible" string:@"virtio,mmio"];
+		[self propertyNamed:@"reg"
+					   cells:@[
+						   @((uint32_t)(isoBase >> 32)), @((uint32_t)(isoBase & 0xFFFFFFFF)), @0x1000, @0,
+					   ]];
+		[self propertyNamed:@"interrupts" cells:@[ @0, @6, @4 ]];
+		[self endNode];
+	}
 
 	[self endNode];
 	[self appendToken:VLFDTTokenEnd];

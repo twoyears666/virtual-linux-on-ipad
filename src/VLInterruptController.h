@@ -8,8 +8,9 @@ uint32_t VLProcessorIndexForCurrentThread(void);
 void VLSetProcessorIndexForCurrentThread(uint32_t index);
 
 /// 只实现 Linux 启动所需的那一小撮 GICv2 行为：
-/// 分发器（0x08000000，4 KB）+ 每个核一份 CPU 接口（0x08001000 起，每份 8 KB）。
-/// 中断号 0–15 是 SGI，16–31 是 PPI，32 起是 SPI，够串口、virtio 和定时器用。
+/// 分发器（0x08000000，4 KB）+ CPU 接口（0x08001000，8 KB，各核共用同一窗口、
+/// 寄存器按核 banking）。中断号 0–15 是 SGI，16–31 是 PPI，32 起是 SPI，
+/// 够串口、virtio 和定时器用。
 @interface VLInterruptController : NSObject <VLDevice>
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress cpuCount:(NSUInteger)cpuCount;

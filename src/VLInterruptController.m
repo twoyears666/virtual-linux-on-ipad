@@ -57,7 +57,7 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 
 @implementation VLInterruptController {
 	uint8_t *_distributor;
-	/// 每个核 8 KB 的 CPU 接口窗口，按核序号排开。
+	/// 每个核一份 8 KB 的寄存器 bank（地址上共用同一个窗口，靠访问者核区分）。
 	uint8_t *_cpuInterfaces;
 	/// SPI（32 起）在分发器上的挂起状态。
 	BOOL _pending[VLGIC_MAXIMUM_IRQ];
@@ -77,7 +77,9 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	if (self) {
 		_baseAddress = baseAddress;
 		_cpuCount = MAX((NSUInteger)1, MIN(cpuCount, (NSUInteger)VLGIC_MAXIMUM_CPUS));
-		_regionSize = 0x1000 + (uint32_t)_cpuCount * 0x2000;
+		// GICv2：分发器 4 KB + CPU 接口 8 KB。CPU 接口是各核「共用同一个地址窗口、
+		// 寄存器按核 banking」的，所以窗口只有一份，不能按核数把地址往后排。
+		_regionSize = 0x1000 + 0x2000;
 		_distributor = calloc(1, 0x1000);
 		_cpuInterfaces = calloc(_cpuCount, 0x2000);
 		_privatePending = calloc(_cpuCount, VLGICPrivateInterrupts * sizeof(BOOL));
@@ -201,8 +203,9 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 		return [self readDistributorAtOffset:offset width:width];
 	}
 	if (offset < _regionSize) {
-		uint32_t cpu = (offset - 0x1000) / 0x2000;
-		uint32_t cpuOffset = (offset - 0x1000) % 0x2000;
+		// 谁在访问就用谁的 bank：Linux 每个核访问的都是同一个 GICC 基址。
+		uint32_t cpu = [self currentCPU];
+		uint32_t cpuOffset = offset - 0x1000;
 		uint8_t *window = _cpuInterfaces + cpu * 0x2000;
 		if (cpuOffset == VLGICCPUAcknowledge) {
 			return [self acknowledgeInterruptForCPU:cpu];
@@ -267,8 +270,9 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	if (offset >= _regionSize) {
 		return;
 	}
-	uint32_t cpu = (offset - 0x1000) / 0x2000;
-	uint32_t cpuOffset = (offset - 0x1000) % 0x2000;
+	// 写也按「访问者核」选 bank，和读保持一致。
+	uint32_t cpu = [self currentCPU];
+	uint32_t cpuOffset = offset - 0x1000;
 	uint8_t *window = _cpuInterfaces + cpu * 0x2000;
 
 	if (cpuOffset == VLGICCPUEndOfInterrupt) {

@@ -1,6 +1,7 @@
 #import "VLLinuxVirtualMachine.h"
 
 #import <math.h>
+#import <mach/mach_time.h>
 #import <string.h>
 #import <sys/stat.h>
 #import <unistd.h>
@@ -92,8 +93,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	NSUInteger _exitCount;
 	BOOL _inputServicePending;
-	/// 系统寄存器陷入的次数；只用来限制日志条数。
+	/// 系统寄存器陷入的累计次数与已记录过的编码；只用来限制日志条数。
 	NSUInteger _systemRegisterTrapCount;
+	NSMutableSet<NSNumber *> *_trappedSystemRegisters;
 
 	/// 每个 vCPU 一份。0 号核跑在 runVirtualMachine 的线程上，其余各自一个线程。
 	VLVCPUSlot _slots[VLMaximumCPUs];
@@ -156,6 +158,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	_exitCount = 0;
 	_inputServicePending = NO;
 	_systemRegisterTrapCount = 0;
+	_trappedSystemRegisters = [NSMutableSet set];
 	[_startCondition lock];
 	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
 		memset(&_slots[index], 0, sizeof(VLVCPUSlot));
@@ -466,6 +469,12 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	}
 	bootVolume = nil;
 
+	// 设备树只能声明这一轮真的会挂上的 virtio 设备：声明了却没有对应设备，
+	// 内核一探测就会命中「未实现的 MMIO 地址」，整台机直接停。
+	BOOL hasBlockDisk = [self hasUsableSystemDisk];
+	BOOL hasISODisc = _configuration.isoPath.length > 0 &&
+		[NSFileManager.defaultManager fileExistsAtPath:_configuration.isoPath];
+
 	NSData *deviceTree = [VLDeviceTree deviceTreeWithMemoryBase:VLGuestMemoryBase
 													memorySize:_guestMemorySize
 												 bootArguments:bootArguments
@@ -478,7 +487,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 													   blockBase:VLBlockBase
 														isoBase:VLISOBase
 													   inputBase:VLInputBase
-														 netBase:VLNetBase];
+														 netBase:VLNetBase
+													hasBlockDisk:hasBlockDisk
+													   hasISODisc:hasISODisc];
 	if (![_guestMemory writeData:deviceTree atGuestAddress:deviceTreeAddress]) {
 		if (error != NULL) {
 			*error = [self errorWithMessage:@"设备树写入失败"];
@@ -489,7 +500,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	 (unsigned long long)deviceTreeAddress, (unsigned long)deviceTree.length,
 	 (unsigned long long)kernelAddress, (long)kernelSize];
 
-	[self setupDevices];
+	[self setupDevicesWithSystemDisk:hasBlockDisk isoDisc:hasISODisc];
 
 	// 0 号核：PC = 内核装载地址，x0 = 设备树地址。vCPU 句柄要等它自己的线程去建，
 	// 这里只把「开机目标和参数」记下来。
@@ -507,7 +518,14 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return YES;
 }
 
-- (void)setupDevices {
+/// 第一块盘有镜像才算可用（设备树和实际设备必须同时决定，否则会声明出空地址）。
+- (BOOL)hasUsableSystemDisk {
+	VLDiskImage *systemDisk = _configuration.disks.firstObject;
+	return systemDisk.path.length > 0 &&
+		[NSFileManager.defaultManager fileExistsAtPath:systemDisk.path];
+}
+
+- (void)setupDevicesWithSystemDisk:(BOOL)hasBlockDisk isoDisc:(BOOL)hasISODisc {
 	_deviceBus = [[VLDeviceBus alloc] init];
 
 	_interruptController = [[VLInterruptController alloc] initWithBaseAddress:VLGICBase
@@ -569,8 +587,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	// 系统盘：第一块盘的镜像挂到 virtio-blk，没有镜像就不挂。
 	VLDiskImage *systemDisk = _configuration.disks.firstObject;
-	if (systemDisk.path.length > 0 &&
-		[NSFileManager.defaultManager fileExistsAtPath:systemDisk.path]) {
+	if (hasBlockDisk) {
 		_block = [[VLVirtioBlock alloc] initWithBaseAddress:VLBlockBase
 											   guestMemory:_guestMemory
 										   interruptNumber:VLBlockInterrupt
@@ -584,7 +601,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 	// 安装镜像：ISO 只读挂成第二块 virtio-blk，安装器才能从里面取软件包。
 	NSString *isoPath = _configuration.isoPath;
-	if (isoPath.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:isoPath]) {
+	if (hasISODisc) {
 		_iso = [[VLVirtioBlock alloc] initWithBaseAddress:VLISOBase
 											 guestMemory:_guestMemory
 										 interruptNumber:VLISOInterrupt
@@ -619,6 +636,16 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 							 interruptController:_interruptController
 										   network:_network];
 	[_deviceBus addDevice:_net];
+
+	// 把这一轮真实的 MMIO 布局记下来：以后再出现「未实现的 MMIO 地址」，
+	// 一眼就能对出是哪个区间少挂了设备。
+	[VLStartupLog log:@"MMIO 布局：GIC 0x%llx(+0x%x)、UART 0x%llx、GPU 0x%llx、block 0x%llx(%@)、"
+					   @"input 0x%llx、net 0x%llx、ISO 0x%llx(%@)，virtio 每段 0x1000",
+	 (unsigned long long)VLGICBase, _interruptController.regionSize,
+	 (unsigned long long)VLUARTBase, (unsigned long long)VLGPUBase,
+	 (unsigned long long)VLBlockBase, hasBlockDisk ? @"已挂" : @"未挂",
+	 (unsigned long long)VLInputBase, (unsigned long long)VLNetBase,
+	 (unsigned long long)VLISOBase, hasISODisc ? @"已挂" : @"未挂"];
 }
 
 - (void)runProcessorLoopForCPU:(NSUInteger)cpuIndex
@@ -695,7 +722,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	uint32_t exceptionClass = (uint32_t)((syndrome >> 26) & 0x3F);
 
 	if (exceptionClass == 0x24 || exceptionClass == 0x25) {
-		return [self handleDataAbortSyndrome:syndrome address:address vcpu:vcpu];
+		return [self handleDataAbortSyndrome:syndrome address:address cpu:cpuIndex vcpu:vcpu];
 	}
 	if (exceptionClass == 0x01) {
 		// WFI/WFE 陷入：客户机在等中断。让出一点 CPU 再往前走，避免空转刷满。
@@ -726,6 +753,48 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return NO;
 }
 
+/// (Op0, Op1, CRn, CRm, Op2) 打包成一个键，顺手当「已记录过」的去重依据。
+static uint32_t VLSystemRegisterKey(uint32_t op0, uint32_t op1, uint32_t crn, uint32_t crm, uint32_t op2) {
+	return (op0 << 14) | (op1 << 10) | (crn << 6) | (crm << 3) | op2;
+}
+
+/// 常见系统寄存器的名字；只为日志可读，认不出来就打印编码。
+static NSString *VLSystemRegisterName(uint32_t key) {
+	switch (key) {
+		case 0xC000: return @"MIDR_EL1";
+		case 0xC004: return @"ID_AA64PFR0_EL1";
+		case 0xC005: return @"MPIDR_EL1";
+		case 0xC006: return @"REVIDR_EL1";
+		case 0xC024: return @"ID_AA64ZFR0_EL1";
+		case 0xC025: return @"ID_AA64PFR1_EL1";
+		case 0xC028: return @"ID_AA64DFR0_EL1";
+		case 0xC029: return @"ID_AA64DFR1_EL1";
+		case 0xC030: return @"ID_AA64ISAR0_EL1";
+		case 0xC031: return @"ID_AA64ISAR1_EL1";
+		case 0xC032: return @"ID_AA64ISAR2_EL1";
+		case 0xC038: return @"ID_AA64MMFR0_EL1";
+		case 0xC039: return @"ID_AA64MMFR1_EL1";
+		case 0xC03A: return @"ID_AA64MMFR2_EL1";
+		case 0xC03B: return @"ID_AA64MMFR3_EL1";
+		case 0xCC01: return @"CTR_EL0";
+		case 0xCC07: return @"DCZID_EL0";
+		case 0xCF80: return @"CNTFRQ_EL0";
+		case 0xCF81: return @"CNTPCT_EL0";
+		case 0xCF82: return @"CNTVCT_EL0";
+		default: return nil;
+	}
+}
+
+/// 客户机看到的 24 MHz 计数器读数（和设备树里串口时钟口径一致）。
+static uint64_t VLGuestCounterValue(void) {
+	static mach_timebase_info_data_t timebase;
+	if (timebase.denom == 0) {
+		mach_timebase_info(&timebase);
+	}
+	uint64_t nanoseconds = mach_absolute_time() * timebase.numer / timebase.denom;
+	return nanoseconds * 24 / 1000;
+}
+
 - (BOOL)handleSystemRegisterTrap:(uint64_t)syndrome vcpu:(uint64_t)vcpu {
 	// ISS 布局（EC=0x18）：bit0 方向（1=读 MRS，0=写 MSR），
 	// [4:1] CRm，[8:5] Rt，[12:9] CRn，[16:13] Op1，[19:17] Op2，[21:20] Op0。
@@ -737,18 +806,48 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	uint32_t op1 = (iss >> 13) & 0xF;
 	uint32_t op2 = (iss >> 17) & 0x7;
 	uint32_t op0 = (iss >> 20) & 0x3;
+	uint32_t key = VLSystemRegisterKey(op0, op1, crn, crm, op2);
 
-	// 一律按 0 返回：对 ID 寄存器等于「这项特性没有」，Linux 会走通用实现。
+	// ID 类寄存器返回 0 等于「这项特性不存在」，Linux 会走通用实现；但计数器频率、
+	// 计数器读数和 MPIDR 会被内核直接拿去算，零值会把启动带进死胡同。
+	uint64_t value = 0;
+	switch (key) {
+		case 0xCF80: // CNTFRQ_EL0
+			value = 24000000;
+			break;
+		case 0xCF81: // CNTPCT_EL0
+		case 0xCF82: // CNTVCT_EL0
+			value = VLGuestCounterValue();
+			break;
+		case 0xC005: // MPIDR_EL1
+			value = 0x80000000u | VLProcessorIndexForCurrentThread();
+			break;
+		case 0xC000: // MIDR_EL1：Cortex-A57，和设备树里的 compatible 对得上
+			value = 0x411FD070u;
+			break;
+		default:
+			value = 0;
+			break;
+	}
 	if (isRead && rt < 31) {
-		[_hypervisor setRegister:rt value:0 forVCPU:vcpu];
+		[_hypervisor setRegister:rt value:value forVCPU:vcpu];
 	}
 
-	// 只记前十几条，免得每核每寄存器都刷一行。
-	if (_systemRegisterTrapCount < 16) {
-		[VLStartupLog log:@"系统寄存器陷入（%@）：op0=%u op1=%u CRn=%u CRm=%u op2=%u Rt=%u，按 0 处理",
-		 isRead ? @"读" : @"写", op0, op1, crn, crm, op2, rt];
-	}
+	// 同一个寄存器只记一次：以前每撞一次就刷一行，日志里全是重复的「错的都差不多」。
 	_systemRegisterTrapCount++;
+	NSNumber *keyBox = @(key);
+	if (_trappedSystemRegisters.count < 32 &&
+		![_trappedSystemRegisters containsObject:keyBox]) {
+		[_trappedSystemRegisters addObject:keyBox];
+		NSString *name = VLSystemRegisterName(key);
+		NSString *label = name != nil
+			? [NSString stringWithFormat:@"%@（op0=%u op1=%u CRn=%u CRm=%u op2=%u）",
+										 name, op0, op1, crn, crm, op2]
+			: [NSString stringWithFormat:@"未知寄存器（op0=%u op1=%u CRn=%u CRm=%u op2=%u）",
+										 op0, op1, crn, crm, op2];
+		[VLStartupLog log:@"系统寄存器陷入（%@）：%@，按 0x%llx 返回",
+		 isRead ? @"读" : @"写", label, (unsigned long long)value];
+	}
 
 	uint64_t pc = 0;
 	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
@@ -756,10 +855,18 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return YES;
 }
 
-- (BOOL)handleDataAbortSyndrome:(uint64_t)syndrome address:(uint64_t)address vcpu:(uint64_t)vcpu {
+- (BOOL)handleDataAbortSyndrome:(uint64_t)syndrome
+						address:(uint64_t)address
+							cpu:(NSUInteger)cpuIndex
+						   vcpu:(uint64_t)vcpu {
 	BOOL instructionValid = ((syndrome >> 24) & 0x1) != 0;
+	uint64_t pc = 0;
+	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
 	if (!instructionValid) {
-		[self reportFailure:[NSString stringWithFormat:@"MMIO 访问无法解码 0x%llx", (unsigned long long)address]];
+		[self reportFailure:[NSString stringWithFormat:
+			@"MMIO 访问无法解码：地址 0x%llx，核 %lu，PC=0x%llx，ESR=0x%llx",
+			(unsigned long long)address, (unsigned long)cpuIndex,
+			(unsigned long long)pc, (unsigned long long)syndrome]];
 		return NO;
 	}
 
@@ -785,14 +892,15 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	[_deviceLock unlock];
 
 	if (!handled) {
-		[self reportFailure:[NSString stringWithFormat:@"访问了未实现的 MMIO 地址 0x%llx（%u 字节%@）",
-							(unsigned long long)address, width, isWrite ? @"写" : @"读"]];
+		// 带上 PC 和核号：访问落在所有设备区间之外，照着 PC 能直接定位是哪条指令在读哪个地址。
+		[self reportFailure:[NSString stringWithFormat:
+			@"访问了未实现的 MMIO 地址 0x%llx（%u 字节%@），核 %lu，PC=0x%llx，ESR=0x%llx",
+			(unsigned long long)address, width, isWrite ? @"写" : @"读",
+			(unsigned long)cpuIndex, (unsigned long long)pc, (unsigned long long)syndrome]];
 		return NO;
 	}
 
 	// 虚拟机停在触发异常的那条指令上，模拟完要自己往前推一条，否则会反复触发。
-	uint64_t pc = 0;
-	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
 	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 	return YES;
 }
