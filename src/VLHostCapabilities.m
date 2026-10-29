@@ -147,6 +147,28 @@ static void *VLHypervisorHandle(NSString **outPath) {
 	return (NSUInteger)(info.resident_size / (1024ULL * 1024ULL));
 }
 
++ (double)cpuPercentSinceLastSample {
+	static double lastCPUSeconds = 0;
+	static NSTimeInterval lastWallSeconds = 0;
+
+	task_basic_info_data_t info;
+	mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
+	if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+		return 0;
+	}
+
+	double cpuSeconds = (double)(info.user_time.seconds + info.system_time.seconds) +
+		(double)(info.user_time.microseconds + info.system_time.microseconds) / 1000000.0;
+	NSTimeInterval wallSeconds = NSProcessInfo.processInfo.systemUptime;
+	double percent = 0;
+	if (lastWallSeconds > 0 && wallSeconds > lastWallSeconds) {
+		percent = (cpuSeconds - lastCPUSeconds) / (wallSeconds - lastWallSeconds) * 100.0;
+	}
+	lastCPUSeconds = cpuSeconds;
+	lastWallSeconds = wallSeconds;
+	return percent;
+}
+
 + (NSUInteger)maximumGuestMemoryMB {
 	NSUInteger physical = [self physicalMemoryMB];
 	if (physical < 1024) {

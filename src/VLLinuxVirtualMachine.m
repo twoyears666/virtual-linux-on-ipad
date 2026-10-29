@@ -116,6 +116,12 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	uint64_t _guestMemorySize;
 	uint32_t _displayWidth;
 	uint32_t _displayHeight;
+
+	/// 运行采样：每 30 秒记一行 CPU / 内存 / 退出次数，用来判断是不是这台虚拟机
+	/// 把整机的 CPU 或内存吃满，连累系统服务（例如媒体服务）被饿死。
+	dispatch_source_t _usageTimer;
+	uint64_t _totalExits;
+	uint64_t _sampledExits;
 }
 
 - (instancetype)initWithConfiguration:(VLVMConfiguration *)configuration {
@@ -198,7 +204,45 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	thread.name = @"VirtualLinux.vCPU0";
 	thread.qualityOfService = NSQualityOfServiceUserInteractive;
 	[thread start];
+	[self startUsageSampling];
 	return YES;
+}
+
+/// 每 30 秒量一次自身的 CPU / 内存占用。用 UTILITY 队列上的定时器，少干扰客户机。
+- (void)startUsageSampling {
+	if (_usageTimer != NULL) {
+		return;
+	}
+	_totalExits = 0;
+	_sampledExits = 0;
+	_usageTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+										 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+	dispatch_source_set_timer(_usageTimer,
+							  dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)),
+							  (uint64_t)(30 * NSEC_PER_SEC),
+							  (uint64_t)(5 * NSEC_PER_SEC));
+	__weak typeof(self) weakSelf = self;
+	dispatch_source_set_event_handler(_usageTimer, ^{
+		typeof(self) strongSelf = weakSelf;
+		if (strongSelf == nil) {
+			return;
+		}
+		[strongSelf logUsageSample];
+	});
+	dispatch_resume(_usageTimer);
+}
+
+- (void)logUsageSample {
+	// 注意先取 CPU 采样：它自带「距上次调用」的时间基准。
+	double cpuPercent = [VLHostCapabilities cpuPercentSinceLastSample];
+	uint64_t exits = __atomic_load_n(&_totalExits, __ATOMIC_RELAXED);
+	uint64_t delta = exits - _sampledExits;
+	_sampledExits = exits;
+	[VLStartupLog log:@"运行采样：CPU %.0f%%（%lu 核），占用 %lu MB，可用 %lu MB，退出 %llu 次/30 秒",
+	 (double)cpuPercent, (unsigned long)_cpuCount,
+	 (unsigned long)[VLHostCapabilities residentMemoryMB],
+	 (unsigned long)[VLHostCapabilities availableMemoryMB],
+	 (unsigned long long)delta];
 }
 
 - (void)stop {
@@ -701,6 +745,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	while (![self isStopRequested]) {
 		// 每次退出都可能产生临时对象（画面数据），按迭代回收，避免长期运行内存一直涨。
 		@autoreleasepool {
+			__atomic_add_fetch(&_totalExits, 1, __ATOMIC_RELAXED);
 			int32_t result = [_hypervisor runVCPU:vcpu];
 			if (result != 0) {
 				[self reportFailure:[NSString stringWithFormat:@"hv_vcpu_run 失败（0x%x）", (unsigned)result]];
@@ -1198,6 +1243,10 @@ static uint64_t VLGuestCounterValue(void) {
 #pragma mark - 清理
 
 - (void)teardown {
+	if (_usageTimer != NULL) {
+		dispatch_source_cancel(_usageTimer);
+		_usageTimer = nil;
+	}
 	// vCPU 由各自的线程负责销毁（HVF 要求同线程），这里只回收公共资源。
 	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
 		_slots[index].vcpu = 0;
