@@ -4,6 +4,7 @@
 #import <mach/mach_time.h>
 #import <string.h>
 #import <sys/stat.h>
+#import <UIKit/UIKit.h>
 #import <unistd.h>
 
 #import "VLDeviceBus.h"
@@ -11,6 +12,7 @@
 #import "VLDiskBootVolume.h"
 #import "VLDiskImage.h"
 #import "VLGuestMemory.h"
+#import "VLHostCapabilities.h"
 #import "VLHypervisor.h"
 #import "VLInterruptController.h"
 #import "VLNetStack.h"
@@ -126,8 +128,24 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		_displayHeight = 768;
 		_startCondition = [[NSCondition alloc] init];
 		_deviceLock = [[NSRecursiveLock alloc] init];
+		// 系统内存告警直接关系到「全机没声音」这类连锁反应，留一行日志好对时间点。
+		[NSNotificationCenter.defaultCenter addObserver:self
+											   selector:@selector(hostDidReceiveMemoryWarning:)
+												   name:UIApplicationDidReceiveMemoryWarningNotification
+												 object:nil];
 	}
 	return self;
+}
+
+- (void)dealloc {
+	[NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+- (void)hostDidReceiveMemoryWarning:(NSNotification *)notification {
+	[VLStartupLog log:@"系统内存告警：本进程占用 %lu MB，可用 %lu MB，客户机 %llu MB",
+	 (unsigned long)[VLHostCapabilities residentMemoryMB],
+	 (unsigned long)[VLHostCapabilities availableMemoryMB],
+	 (unsigned long long)(_guestMemorySize / (1024ULL * 1024ULL))];
 }
 
 #pragma mark - 启动与停止
@@ -378,7 +396,21 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 }
 
 - (BOOL)setupEnvironmentWithError:(NSError **)error {
-	_guestMemorySize = (uint64_t)MAX((NSUInteger)_configuration.memoryMB, (NSUInteger)128) * 1024ULL * 1024ULL;
+	// 客机内存不能按配置要多少给多少：前台把整机内存吃满，系统会把后台服务
+	// （首当其冲是媒体服务）挤进 jetsam，表现就是全机没声音、强退 App 才恢复。
+	NSUInteger requestedMemoryMB = MAX((NSUInteger)_configuration.memoryMB, (NSUInteger)128);
+	NSUInteger maximumMemoryMB = [VLHostCapabilities maximumGuestMemoryMB];
+	NSUInteger effectiveMemoryMB = MIN(requestedMemoryMB, maximumMemoryMB);
+	if (effectiveMemoryMB < requestedMemoryMB) {
+		[VLStartupLog log:@"配置 %lu MB 内存，实际按 %lu MB 启动（本机 %lu MB，要给系统留出余量）",
+		 (unsigned long)requestedMemoryMB, (unsigned long)effectiveMemoryMB,
+		 (unsigned long)[VLHostCapabilities physicalMemoryMB]];
+	}
+	_guestMemorySize = (uint64_t)effectiveMemoryMB * 1024ULL * 1024ULL;
+	[VLStartupLog log:@"本机内存 %lu MB，本进程可用 %lu MB，启动前占用 %lu MB",
+	 (unsigned long)[VLHostCapabilities physicalMemoryMB],
+	 (unsigned long)[VLHostCapabilities availableMemoryMB],
+	 (unsigned long)[VLHostCapabilities residentMemoryMB]];
 
 	// 界面里的「CPU 核心数」在这里真正生效：0 号核直接开机，其余核等 PSCI CPU_ON。
 	NSUInteger requestedCores = MAX((NSUInteger)1, _configuration.cpuCores);
@@ -401,6 +433,12 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	if (![_guestMemory allocateWithError:error]) {
 		return NO;
 	}
+	// 映射完再量一次：如果「占用」一次性跳涨等于客户机内存，说明这块内存是被整块占住的，
+	// 那就必须靠启动时的上限来给系统留余量，运行时已经退不回去了。
+	[VLStartupLog log:@"客户机内存 %llu MB 已映射，本进程占用 %lu MB，可用 %lu MB",
+	 (unsigned long long)(_guestMemorySize / (1024ULL * 1024ULL)),
+	 (unsigned long)[VLHostCapabilities residentMemoryMB],
+	 (unsigned long)[VLHostCapabilities availableMemoryMB]];
 
 	// 启动来源：系统盘里已经有装好的系统就优先用它（内核 / initrd / 命令行由安装器写在
 	// 系统盘的 FAT 分区里），否则退回 ISO 里抽出来的那套安装内核。

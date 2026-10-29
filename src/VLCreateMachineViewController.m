@@ -210,7 +210,7 @@
 	self.cpuValueLabel = [self valueLabelWithText:@"4 核"];
 	self.cpuSlider = [self sliderWithMin:1.0 max:8.0 value:4.0 action:@selector(cpuSliderChanged:)];
 
-	// 内存上限：本机 75% 与「本机内存 - 1 GB」取小，按 512 MB 对齐。
+	// 内存上限：本机内存的一半，并且至少给系统留 2 GB，按 512 MB 对齐。
 	NSUInteger maximumMemoryMB = MAX((NSUInteger)512, [VLHostCapabilities maximumGuestMemoryMB]);
 	NSUInteger defaultMemoryMB = MIN((NSUInteger)2048, maximumMemoryMB);
 	self.memoryValueLabel =
@@ -221,7 +221,7 @@
 									 action:@selector(memorySliderChanged:)];
 
 	UILabel *note = [[UILabel alloc] init];
-	note.text = [NSString stringWithFormat:@"按 0.5 GB 递增，最大 %lu MB（本机 %lu MB 的 75%%，并至少给系统留 1 GB）",
+	note.text = [NSString stringWithFormat:@"按 0.5 GB 递增，最大 %lu MB（本机 %lu MB 的一半，且至少给系统留 2 GB）",
 				 (unsigned long)maximumMemoryMB, (unsigned long)[VLHostCapabilities physicalMemoryMB]];
 	note.numberOfLines = 0;
 	note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];

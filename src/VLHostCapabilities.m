@@ -1,6 +1,8 @@
 #import "VLHostCapabilities.h"
 
 #import <dlfcn.h>
+#import <mach/mach.h>
+#import <os/proc.h>
 #import <sys/sysctl.h>
 
 static NSString *VLHardwareModel(void) {
@@ -130,15 +132,32 @@ static void *VLHypervisorHandle(NSString **outPath) {
 	return (NSUInteger)(NSProcessInfo.processInfo.physicalMemory / (1024ULL * 1024ULL));
 }
 
++ (NSUInteger)availableMemoryMB {
+	// os_proc_available_memory 给的是「本进程还能用多少」，没上限时返回 0，这时不猜。
+	size_t available = os_proc_available_memory();
+	return (NSUInteger)(available / (1024ULL * 1024ULL));
+}
+
++ (NSUInteger)residentMemoryMB {
+	mach_task_basic_info_data_t info;
+	mach_count_t count = MACH_TASK_BASIC_INFO_COUNT;
+	if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+		return 0;
+	}
+	return (NSUInteger)(info.resident_size / (1024ULL * 1024ULL));
+}
+
 + (NSUInteger)maximumGuestMemoryMB {
 	NSUInteger physical = [self physicalMemoryMB];
 	if (physical < 1024) {
 		return 512;
 	}
 
-	NSUInteger seventyFive = (NSUInteger)((double)physical * 0.75);
-	NSUInteger withSystemReserve = physical - 1024;
-	NSUInteger maximum = MIN(seventyFive, withSystemReserve);
+	// 只给客机一半，并且至少给系统留 2 GB。留太少的话，前台大内存 App 会把
+	// 后台服务（首当其冲是媒体服务）挤进 jetsam，症状就是全机没声音。
+	NSUInteger half = physical / 2;
+	NSUInteger withSystemReserve = physical > 2048 ? physical - 2048 : half;
+	NSUInteger maximum = MIN(half, withSystemReserve);
 	maximum -= maximum % 512;
 	return MAX(maximum, 512);
 }
