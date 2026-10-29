@@ -158,11 +158,13 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"compatible" string:@"arm,cortex-a15-gic"];
 	[self propertyNamed:@"#interrupt-cells" cells:@[ @3 ]];
 	[self propertyNamed:@"interrupt-controller" bytes:[NSData data]];
+	// 注意：#size-cells = 2，大小是「高 32 位、低 32 位」两个 cell。
+	// 之前写成 @0x1000, @0 等于 0x1000_00000000（17 TB），ioremap 会把页表铺满整块内存。
 	[self propertyNamed:@"reg"
 				   cells:@[
-					   @((uint32_t)(gicBase >> 32)), @((uint32_t)(gicBase & 0xFFFFFFFF)), @0x1000, @0,
+					   @((uint32_t)(gicBase >> 32)), @((uint32_t)(gicBase & 0xFFFFFFFF)), @0, @0x1000,
 					   @((uint32_t)((gicBase + 0x1000) >> 32)), @((uint32_t)((gicBase + 0x1000) & 0xFFFFFFFF)),
-					   @0x2000, @0,
+					   @0, @0x2000,
 				   ]];
 	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleInterruptController) ]];
 	[self endNode];
@@ -172,7 +174,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"compatible" string:@"arm,pl011"];
 	[self propertyNamed:@"reg"
 				   cells:@[
-					   @((uint32_t)(uartBase >> 32)), @((uint32_t)(uartBase & 0xFFFFFFFF)), @0x1000, @0,
+					   @((uint32_t)(uartBase >> 32)), @((uint32_t)(uartBase & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @1, @4 ]];
 	[self propertyNamed:@"clock-frequency" cells:@[ @24000000 ]];
@@ -183,7 +185,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
 	[self propertyNamed:@"reg"
 				   cells:@[
-					   @((uint32_t)(gpuBase >> 32)), @((uint32_t)(gpuBase & 0xFFFFFFFF)), @0x1000, @0,
+					   @((uint32_t)(gpuBase >> 32)), @((uint32_t)(gpuBase & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @2, @4 ]];
 	[self endNode];
@@ -194,7 +196,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 		[self propertyNamed:@"compatible" string:@"virtio,mmio"];
 		[self propertyNamed:@"reg"
 					   cells:@[
-						   @((uint32_t)(blockBase >> 32)), @((uint32_t)(blockBase & 0xFFFFFFFF)), @0x1000, @0,
+						   @((uint32_t)(blockBase >> 32)), @((uint32_t)(blockBase & 0xFFFFFFFF)), @0, @0x1000,
 					   ]];
 		[self propertyNamed:@"interrupts" cells:@[ @0, @3, @4 ]];
 		[self endNode];
@@ -205,7 +207,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
 	[self propertyNamed:@"reg"
 				   cells:@[
-					   @((uint32_t)(inputBase >> 32)), @((uint32_t)(inputBase & 0xFFFFFFFF)), @0x1000, @0,
+					   @((uint32_t)(inputBase >> 32)), @((uint32_t)(inputBase & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @4, @4 ]];
 	[self endNode];
@@ -215,7 +217,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
 	[self propertyNamed:@"reg"
 				   cells:@[
-					   @((uint32_t)(netBase >> 32)), @((uint32_t)(netBase & 0xFFFFFFFF)), @0x1000, @0,
+					   @((uint32_t)(netBase >> 32)), @((uint32_t)(netBase & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @5, @4 ]];
 	[self endNode];
@@ -226,7 +228,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 		[self propertyNamed:@"compatible" string:@"virtio,mmio"];
 		[self propertyNamed:@"reg"
 					   cells:@[
-						   @((uint32_t)(isoBase >> 32)), @((uint32_t)(isoBase & 0xFFFFFFFF)), @0x1000, @0,
+						   @((uint32_t)(isoBase >> 32)), @((uint32_t)(isoBase & 0xFFFFFFFF)), @0, @0x1000,
 					   ]];
 		[self propertyNamed:@"interrupts" cells:@[ @0, @6, @4 ]];
 		[self endNode];
