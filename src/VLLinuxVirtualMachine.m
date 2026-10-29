@@ -1115,9 +1115,9 @@ static uint64_t VLGuestCounterValue(void) {
 	}
 
 	[_hypervisor setRegister:0 value:result forVCPU:vcpu];
-	uint64_t pc = 0;
-	[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
-	[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
+	// HVC 的返回地址按架构规定是「HVC 后面那条指令」，Hypervisor.framework 交出来的
+	// PC 已经是它了，这里不能再 +4：多走一条会把 __arm_smccc_hvc 里的取 res 指针
+	// （ldr x4, [sp]）整条跳过，内核随后拿 x4=0 去写结果，直接 NULL 解引用 panic。
 	return YES;
 }
 
