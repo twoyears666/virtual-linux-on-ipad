@@ -63,6 +63,10 @@ typedef NS_OPTIONS(uint32_t, VLHypervisorMemoryFlags) {
 /// 实际加载的二进制路径。
 @property (nonatomic, readonly, copy) NSString *loadedPath;
 
+/// 框架是否自带 vGIC（`hv_gic_*` 一族）。macOS 15 起才有；有的话可以把 GIC 整个交回框架。
+/// 只作为能力探测，当前运行路径仍然走自研的 GICv2 模拟。
+@property (nonatomic, readonly) BOOL gicAvailable;
+
 /// 返回值 0 表示 HV_SUCCESS。
 - (int32_t)createVirtualMachine;
 - (int32_t)destroyVirtualMachine;

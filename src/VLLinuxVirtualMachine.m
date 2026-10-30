@@ -42,14 +42,15 @@ static const uint64_t VLInputBase = 0x0C000000;
 static const uint64_t VLNetBase = 0x0D000000;
 static const uint64_t VLISOBase = 0x0E000000;
 
-// GIC 中断号：SPI 从 32 开始。PPI 编号按 arm64 的约定（设备树里 timer 节点写的是
-// 13/14/11/10），EL1 虚拟定时器是 PPI 11——27 是 32 位 ARM 的编号，在 arm64 上没用。
+// GIC 中断号一律用 INTID：SGI 0–15、PPI 16–31、SPI 32 起。
+// 设备树里 timer 节点的序号按 DT 约定写 13/14/11/10，内核解析时会加上 16，
+// 所以客户机真正挂在 GIC 上的是 29/30/27/26；EL1 虚拟定时器是 INTID 27。
 static const uint32_t VLGPUInterrupt = 34;
 static const uint32_t VLBlockInterrupt = 35;
 static const uint32_t VLInputInterrupt = 36;
 static const uint32_t VLNetInterrupt = 37;
 static const uint32_t VLISOInterrupt = 38;
-static const uint32_t VLPPIVirtualTimer = 11;
+static const uint32_t VLPPIVirtualTimer = 27;
 
 /// HVC 调用（PSCI）里的功能号
 #define VL_PSCI_VERSION 0x84000000ULL
@@ -75,11 +76,24 @@ typedef struct {
 	BOOL finished;
 	uint64_t startPC;
 	uint64_t startContextID;
+	/// 诊断用：这个核最后一次「有意义」的退出（WFI / 系统寄存器）停在哪儿。
+	/// 卡住时一眼看出是哪个核停在哪个 PC，比猜便宜。
+	uint64_t lastExitPC;
+	uint32_t lastExitReason;
 } VLVCPUSlot;
 
 
 static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return (value + alignment - 1) & ~(alignment - 1);
+}
+
+/// 诊断标签：0 表示刚进客户机（还没退出），其余是异常的 EC 值。
+static NSString *VLCPURestName(uint32_t reason) {
+	switch (reason) {
+		case 0x01: return @"WFI";
+		case 0x18: return @"系统寄存器";
+		default: return [NSString stringWithFormat:@"EC0x%x", reason];
+	}
 }
 
 @implementation VLLinuxVirtualMachine {
@@ -114,11 +128,12 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	NSCondition *_startCondition;
 	NSRecursiveLock *_deviceLock;
 
-	/// 每条中断线的「上升沿」计数，以及每个核已经下发过的那一代。
+	/// 每条中断线的「期望电平」（设备侧看到的），以及每个核已经真正下发给 HVF 的电平。
 	/// HVF 的 pending 中断只能由负责跑这个 vCPU 的线程设置（不是跨线程安全的），
-	/// 所以设备那边只记「线又高了一次」，由各核自己的循环在进客户机前真正下发。
-	uint64_t _irqLineGeneration[VLMaximumCPUs];
-	uint64_t _irqLineAppliedGeneration[VLMaximumCPUs];
+	/// 所以设备那边只记电平，由各核自己的循环在进客户机前把电平同步给 HVF。
+	/// 电平而不是上升沿：拉低也必须下发，否则 HVF 的 IRQ 线会一直保持拉高。
+	BOOL _irqLineLevel[VLMaximumCPUs];
+	BOOL _irqLineApplied[VLMaximumCPUs];
 	NSUInteger _irqInjectFailureCount;
 
 	BOOL _stopRequested;
@@ -206,8 +221,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
 		memset(&_slots[index], 0, sizeof(VLVCPUSlot));
 	}
-	memset(_irqLineGeneration, 0, sizeof(_irqLineGeneration));
-	memset(_irqLineAppliedGeneration, 0, sizeof(_irqLineAppliedGeneration));
+	memset(_irqLineLevel, 0, sizeof(_irqLineLevel));
+	memset(_irqLineApplied, 0, sizeof(_irqLineApplied));
 	_irqInjectFailureCount = 0;
 	[_startCondition unlock];
 	[self parseDisplayResolution];
@@ -251,11 +266,41 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	uint64_t exits = __atomic_load_n(&_totalExits, __ATOMIC_RELAXED);
 	uint64_t delta = exits - _sampledExits;
 	_sampledExits = exits;
-	[VLStartupLog log:@"运行采样：CPU %.0f%%（%lu 核），占用 %lu MB，可用 %lu MB，退出 %llu 次/30 秒",
+	[VLStartupLog log:@"运行采样：CPU %.0f%%（%lu 核），占用 %lu MB，可用 %lu MB，退出 %llu 次/30 秒；各核 %@",
 	 (double)cpuPercent, (unsigned long)_cpuCount,
 	 (unsigned long)[VLHostCapabilities residentMemoryMB],
 	 (unsigned long)[VLHostCapabilities availableMemoryMB],
-	 (unsigned long long)delta];
+	 (unsigned long long)delta,
+	 [self describeProcessorStates]];
+}
+
+/// 每个核最后一次「有意义」的退出（WFI / 系统寄存器）停在哪儿。
+/// 多核卡死时，这一串比任何猜测都直接：能看出是哪个核停在哪条指令上。
+- (NSString *)describeProcessorStates {
+	NSMutableString *text = [NSMutableString string];
+	for (NSUInteger index = 0; index < _cpuCount; index++) {
+		uint32_t reason = _slots[index].lastExitReason;
+		if (index > 0) {
+			[text appendString:@"，"];
+		}
+		if (reason == 0) {
+			[text appendFormat:@"%lu=运行中", (unsigned long)index];
+		} else {
+			[text appendFormat:@"%lu=%@@0x%llx", (unsigned long)index, VLCPURestName(reason),
+			 (unsigned long long)_slots[index].lastExitPC];
+		}
+	}
+	return text;
+}
+
+/// 只做诊断，不加锁：arm64 上对齐的 64/32 位写是原子的，
+/// 最坏情况是采样线程读到一半新旧混搭的值，不影响运行。
+- (void)noteCPURest:(uint64_t)pc reason:(uint32_t)reason forCPU:(NSUInteger)index {
+	if (index >= VLMaximumCPUs) {
+		return;
+	}
+	_slots[index].lastExitPC = pc;
+	_slots[index].lastExitReason = reason;
 }
 
 - (void)stop {
@@ -295,42 +340,41 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 #pragma mark - 中断线
 
-/// 设备侧的中断线变化：只记「这个核的线又高了一次」，并把目标核从 hv_vcpu_run 里踢出来。
-/// hv_vcpu_set_pending_interrupt 必须在管着这个 vCPU 的线程上调用（跨线程调会被拒），
-/// 而 pending 中断也只在「进客户机」那一刻生效——目标核很可能正躺在 run 里自旋等中断
-/// （stop_machine 就是这样），不踢出来就永远轮不到下发，多核会卡死在第一个 IPI。
+/// 设备侧的中断线变化：记下这个核的「期望电平」，电平由 0 变 1 时把目标核从
+/// hv_vcpu_run 里踢出来。hv_vcpu_set_pending_interrupt 必须在管着这个 vCPU 的线程上
+/// 调用（跨线程调会被拒），而 pending 中断也只在「进客户机」那一刻生效——目标核
+/// 很可能正躺在 run 里自旋等中断（stop_machine 就是这样），不踢出来就永远轮不到下发。
 - (void)recordIRQLine:(BOOL)asserted forCPU:(NSUInteger)index {
 	if (index >= VLMaximumCPUs) {
 		return;
 	}
-	if (!asserted) {
-		return;
-	}
 	uint64_t vcpu = 0;
 	[_startCondition lock];
-	_irqLineGeneration[index]++;
+	BOOL rising = asserted && !_irqLineLevel[index];
+	_irqLineLevel[index] = asserted;
 	if (index < _cpuCount) {
 		vcpu = _slots[index].vcpu;
 	}
 	[_startCondition unlock];
-	if (vcpu != 0) {
+	// 只有拉高需要踢；拉低不用打断客户机，等它下次自然退出时同步即可。
+	if (rising && vcpu != 0) {
 		[_hypervisor exitVCPUs:&vcpu count:1];
 	}
 }
 
-/// 由各核自己的线程调用：有新的一代上升沿就把 pending 置上。
+/// 由各核自己的线程调用：把设备侧的最新电平同步给 HVF（升和降都要同步）。
 - (void)injectPendingIRQForCPU:(NSUInteger)index vcpu:(uint64_t)vcpu {
 	[_startCondition lock];
-	uint64_t generation = _irqLineGeneration[index];
-	BOOL needed = generation != _irqLineAppliedGeneration[index];
+	BOOL level = _irqLineLevel[index];
+	BOOL needed = level != _irqLineApplied[index];
 	if (needed) {
-		_irqLineAppliedGeneration[index] = generation;
+		_irqLineApplied[index] = level;
 	}
 	[_startCondition unlock];
 	if (!needed) {
 		return;
 	}
-	int32_t result = [_hypervisor setPendingIRQ:YES forVCPU:vcpu];
+	int32_t result = [_hypervisor setPendingIRQ:level forVCPU:vcpu];
 	if (result != 0 && _irqInjectFailureCount < 4) {
 		_irqInjectFailureCount++;
 		[VLStartupLog log:@"下发中断失败（0x%x）：核 %lu", (unsigned)result, (unsigned long)index];
@@ -798,7 +842,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		// 每次退出都可能产生临时对象（画面数据），按迭代回收，避免长期运行内存一直涨。
 		@autoreleasepool {
 			__atomic_add_fetch(&_totalExits, 1, __ATOMIC_RELAXED);
-			// 设备侧只记了中断线的上升沿，真正下发给 HVF 必须在本线程、进客户机之前做。
+			// 进客户机前先标成「运行中」，退出后只有 WFI / 系统寄存器会改写它。
+			_slots[cpuIndex].lastExitReason = 0;
+			// 设备侧只记了中断线电平，真正下发给 HVF 必须在本线程、进客户机之前做。
 			[self injectPendingIRQForCPU:cpuIndex vcpu:vcpu];
 			int32_t result = [_hypervisor runVCPU:vcpu];
 			if (result != 0) {
@@ -846,7 +892,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 				[_net serviceReceive];
 			}
 			if (reason == VLHypervisorExitReasonVTimer) {
-				// 客户机虚拟定时器到期：把 PPI 27 挂到本核的 GIC 上（PPI 是核私有的）。
+				// 客户机虚拟定时器到期：把 INTID 27（EL1 虚拟定时器 PPI）挂到本核的 GIC 上。
 				[_interruptController setIRQPending:VLPPIVirtualTimer];
 				continue;
 			}
@@ -880,14 +926,27 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 									   vcpu:vcpu];
 	}
 	if (exceptionClass == 0x01) {
-		// WFI/WFE 陷入：客户机在等中断。让出一点 CPU 再往前走，避免空转刷满。
+		// WFI/WFE 陷入：客户机在等中断。只有本核真的有能投递的挂起中断时，这条指令
+		// 才算执行完（PC+4）；否则原地睡一会儿再重试同一条指令。
+		// 之前无条件 PC+4 等于把 WFI 当 nop，客户机永远不会真睡，定时器中断也就
+		// 永远「等不到」，多核会在第一个 wait_for_completion 上卡死。
 		if (cpuIndex == 0 && _inputServicePending) {
 			_inputServicePending = NO;
 			[_input servicePendingEvents];
 		}
-		usleep(500);
 		uint64_t pc = 0;
 		[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+		[self noteCPURest:pc reason:exceptionClass forCPU:cpuIndex];
+		// 客户机自己关了中断（PSTATE.I=1）还执行 WFI，在真机上也不会被唤醒；
+		// 这种情况照旧推进 PC，免得把整台机卡死在一条等不到事件的 WFI 上。
+		uint64_t cpsr = 0;
+		[_hypervisor getRegister:VLHypervisorRegisterCPSR value:&cpsr forVCPU:vcpu];
+		BOOL irqMasked = (cpsr & (1ULL << 7)) != 0;
+		if (!irqMasked &&
+			![_interruptController hasPendingInterruptForCPU:(uint32_t)cpuIndex]) {
+			usleep(1000);
+			return YES;
+		}
 		[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 		return YES;
 	}
@@ -897,6 +956,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	if (exceptionClass == 0x18) {
 		// 系统寄存器陷入：Apple 的 Hypervisor 没实现这个寄存器（例如 ID_AA64ISAR2_EL1），
 		// 内核一读就直接退出。按「该特性不存在」返回 0，然后跳过这条指令继续跑。
+		uint64_t pc = 0;
+		[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+		[self noteCPURest:pc reason:exceptionClass forCPU:cpuIndex];
 		return [self handleSystemRegisterTrap:syndrome vcpu:vcpu];
 	}
 
@@ -952,14 +1014,16 @@ static uint64_t VLGuestCounterValue(void) {
 }
 
 - (BOOL)handleSystemRegisterTrap:(uint64_t)syndrome vcpu:(uint64_t)vcpu {
-	// ISS 布局（EC=0x18）：bit0 方向（1=读 MRS，0=写 MSR），
-	// [4:1] CRm，[8:5] Rt，[12:9] CRn，[16:13] Op1，[19:17] Op2，[21:20] Op0。
+	// ISS 布局（EC=0x18）：bit0 方向（1=读 MRS，0=写 MSR），[4:1] CRm，[9:5] Rt，
+	// [13:10] CRn，[16:14] Op1，[19:17] Op2，[21:20] Op0。
+	// 注意 Op1 是 3 位、CRn 从 bit10 起：之前按 [16:13]/[12:9] 取，名字就会整体错一位
+	// （ID_AA64ISAR2_EL1 被认成「未知寄存器」就是这么来的）。
 	uint32_t iss = (uint32_t)(syndrome & 0x1FFFFFF);
 	BOOL isRead = (iss & 0x1) != 0;
 	uint32_t crm = (iss >> 1) & 0xF;
 	uint32_t rt = (iss >> 5) & 0x1F;
-	uint32_t crn = (iss >> 9) & 0xF;
-	uint32_t op1 = (iss >> 13) & 0xF;
+	uint32_t crn = (iss >> 10) & 0xF;
+	uint32_t op1 = (iss >> 14) & 0x7;
 	uint32_t op2 = (iss >> 17) & 0x7;
 	uint32_t op0 = (iss >> 20) & 0x3;
 	uint32_t key = VLSystemRegisterKey(op0, op1, crn, crm, op2);

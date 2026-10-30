@@ -30,4 +30,8 @@ void VLSetProcessorIndexForCurrentThread(uint32_t index);
 - (void)setIRQPending:(uint32_t)irq;
 - (void)clearIRQPending:(uint32_t)irq;
 
+/// 这个核当前有没有「已使能、未被屏蔽」的挂起中断。
+/// WFI 陷入靠它判断能不能算完成：没有中断可投递就不该让客户机继续往下跑。
+- (BOOL)hasPendingInterruptForCPU:(uint32_t)cpu;
+
 @end

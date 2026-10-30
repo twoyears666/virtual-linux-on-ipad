@@ -172,6 +172,10 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	return best;
 }
 
+- (BOOL)hasPendingInterruptForCPU:(uint32_t)cpu {
+	return [self highestPendingInterruptForCPU:cpu] != VLGICSpuriousIRQ;
+}
+
 #pragma mark - 中断线
 
 - (void)refreshLines {
@@ -407,10 +411,12 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	uint32_t filter = (value >> 24) & 0x3;
 	uint32_t requestingCPU = [self currentCPU];
 
-	if (_sgiLogCount < 1) {
+	// 前几条核间中断都记下来：多核起不来时，靠它确认 IPI 到底走到没走到。
+	if (_sgiLogCount < 8) {
 		_sgiLogCount++;
-		[VLStartupLog log:@"GIC 第一次收到核间中断请求：值=0x%08x（核 %u 发起）",
-					  (unsigned)value, (unsigned)requestingCPU];
+		[VLStartupLog log:@"GIC 核间中断：值=0x%08x（中断 %u，核 %u 发起，filter=%u，目标位图=0x%02x）",
+					  (unsigned)value, (unsigned)irq, (unsigned)requestingCPU,
+					  (unsigned)filter, (unsigned)targetList];
 	}
 
 	for (NSUInteger cpu = 0; cpu < _cpuCount; cpu++) {

@@ -24,6 +24,7 @@ typedef int32_t (*VLSetPendingInterrupt)(uint64_t, uint32_t, bool);
 @interface VLHypervisor ()
 
 @property (nonatomic, assign, readwrite) BOOL available;
+@property (nonatomic, assign, readwrite) BOOL gicAvailable;
 @property (nonatomic, copy, readwrite) NSString *failureReason;
 @property (nonatomic, copy, readwrite) NSString *loadedPath;
 
@@ -119,12 +120,52 @@ typedef int32_t (*VLSetPendingInterrupt)(uint64_t, uint32_t, bool);
 		self.available = YES;
 		self.failureReason = nil;
 		[VLStartupLog log:@"Hypervisor 已加载：%@", candidate];
+		[self probeVirtualGICWithHandle:handle];
 		return;
 	}
 
 	self.available = NO;
 	self.loadedPath = nil;
 	self.failureReason = @"未找到可用的 Hypervisor 运行时，请把抽取并重签好的 Hypervisor.framework 放进 App 的 Frameworks/";
+}
+
+/// P0 阶段 0：探一下这份运行时有没有自带 vGIC（`hv_gic_*`，macOS 15 起才有）。
+/// 只做探测和记日志，不改运行路径——当前仍然用自研的 GICv2 模拟。
+/// 有 vGIC 的话，中断就是硬件投递，不用我们再模拟 IAR/EOI、也不用踢核下发 pending。
+- (void)probeVirtualGICWithHandle:(void *)handle {
+	static const char *names[] = {
+		"hv_gic_config_create",
+		"hv_gic_config_set_distributor_base",
+		"hv_gic_config_set_redistributor_base",
+		"hv_gic_config_set_msi_base",
+		"hv_gic_config_set_msi_region_size",
+		"hv_gic_create",
+		"hv_gic_destroy",
+		"hv_gic_get_distributor_base",
+		"hv_gic_get_distributor_size",
+		"hv_gic_get_redistributor_base",
+		"hv_gic_get_redistributor_size",
+		"hv_gic_get_msi_region_base",
+		"hv_gic_get_msi_region_size",
+		"hv_gic_state_create",
+		"hv_gic_state_get_size",
+		"hv_gic_state_get_data",
+		"hv_gic_set_state",
+		"hv_gic_send_msi",
+	};
+	size_t total = sizeof(names) / sizeof(names[0]);
+
+	NSMutableArray<NSString *> *found = [NSMutableArray array];
+	for (size_t index = 0; index < total; index++) {
+		if (dlsym(handle, names[index]) != NULL) {
+			[found addObject:@(names[index])];
+		}
+	}
+	self.gicAvailable = [found containsObject:@"hv_gic_create"];
+	[VLStartupLog log:@"vGIC 探针：%lu/%lu 个符号可用 → %@；结论：%@",
+	 (unsigned long)found.count, (unsigned long)total,
+	 found.count > 0 ? [found componentsJoinedByString:@", "] : @"一个都没有",
+	 self.gicAvailable ? @"可用于 P0，自研 GIC 可退成兜底" : @"不可用，继续用自研 GICv2 模拟"];
 }
 
 #pragma mark - 调用表
