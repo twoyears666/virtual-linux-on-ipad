@@ -2,6 +2,8 @@
 
 #import <stdlib.h>
 
+#import "VLStartupLog.h"
+
 // 分发器寄存器偏移
 static const uint32_t VLGICDistributorControl = 0x000;
 static const uint32_t VLGICDistributorType = 0x004;
@@ -69,6 +71,8 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	/// SPI 的目标核位图（GICD_ITARGETSR）。
 	uint8_t _targets[VLGIC_MAXIMUM_IRQ];
 	BOOL _lineAsserted[VLGIC_MAXIMUM_CPUS];
+	/// 第一次核间中断留一行日志，用来确认多核是不是真走到 IPI 这一步。
+	NSUInteger _sgiLogCount;
 	NSUInteger _cpuCount;
 }
 
@@ -399,6 +403,12 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	uint32_t targetList = (value >> 16) & 0xFF;
 	uint32_t filter = (value >> 24) & 0x3;
 	uint32_t requestingCPU = [self currentCPU];
+
+	if (_sgiLogCount < 1) {
+		_sgiLogCount++;
+		[VLStartupLog log:@"GIC 第一次收到核间中断请求：值=0x%08x（核 %u 发起）",
+					  (unsigned)value, (unsigned)requestingCPU];
+	}
 
 	for (NSUInteger cpu = 0; cpu < _cpuCount; cpu++) {
 		BOOL targeted = NO;

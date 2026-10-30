@@ -169,9 +169,11 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleInterruptController) ]];
 	[self endNode];
 
-	// 串口：SPI 1
+	// 串口：SPI 1。compatible 必须带上 "arm,primecell"：内核才会按 amba 总线
+	// 建这个设备并让 pl011 驱动匹配；只写 "arm,pl011" 会被当成普通平台设备，
+	// 永远等不到 probe，ttyAMA0 不注册，用户态连控制台都打不开。
 	[self beginNode:[NSString stringWithFormat:@"serial@%llx", (unsigned long long)uartBase]];
-	[self propertyNamed:@"compatible" string:@"arm,pl011"];
+	[self propertyNamed:@"compatible" strings:@[ @"arm,pl011", @"arm,primecell" ]];
 	[self propertyNamed:@"reg"
 				   cells:@[
 					   @((uint32_t)(uartBase >> 32)), @((uint32_t)(uartBase & 0xFFFFFFFF)), @0, @0x1000,
@@ -318,6 +320,17 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	NSMutableData *data = [NSMutableData dataWithData:encoded];
 	uint8_t terminator = 0;
 	[data appendBytes:&terminator length:1];
+	[self propertyNamed:name bytes:data];
+}
+
+- (void)propertyNamed:(NSString *)name strings:(NSArray<NSString *> *)values {
+	// 多串 compatible：每个串各自以 NUL 结尾，拼成一段数据。
+	NSMutableData *data = [NSMutableData data];
+	for (NSString *value in values) {
+		[data appendData:[value dataUsingEncoding:NSUTF8StringEncoding]];
+		uint8_t terminator = 0;
+		[data appendBytes:&terminator length:1];
+	}
 	[self propertyNamed:name bytes:data];
 }
 

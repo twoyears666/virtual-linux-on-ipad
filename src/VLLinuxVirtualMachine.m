@@ -111,6 +111,13 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	NSCondition *_startCondition;
 	NSRecursiveLock *_deviceLock;
 
+	/// 每条中断线的「上升沿」计数，以及每个核已经下发过的那一代。
+	/// HVF 的 pending 中断只能由负责跑这个 vCPU 的线程设置（不是跨线程安全的），
+	/// 所以设备那边只记「线又高了一次」，由各核自己的循环在进客户机前真正下发。
+	uint64_t _irqLineGeneration[VLMaximumCPUs];
+	uint64_t _irqLineAppliedGeneration[VLMaximumCPUs];
+	NSUInteger _irqInjectFailureCount;
+
 	BOOL _stopRequested;
 	BOOL _framePending;
 	uint64_t _guestMemorySize;
@@ -196,6 +203,9 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	for (NSUInteger index = 0; index < VLMaximumCPUs; index++) {
 		memset(&_slots[index], 0, sizeof(VLVCPUSlot));
 	}
+	memset(_irqLineGeneration, 0, sizeof(_irqLineGeneration));
+	memset(_irqLineAppliedGeneration, 0, sizeof(_irqLineAppliedGeneration));
+	_irqInjectFailureCount = 0;
 	[_startCondition unlock];
 	[self parseDisplayResolution];
 	[self reportState:VLVirtualMachineStateStarting message:@"创建虚拟硬件…"];
@@ -278,6 +288,42 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 - (BOOL)isStopRequested {
 	return _stopRequested;
+}
+
+#pragma mark - 中断线
+
+/// 设备侧的中断线变化：只记「这个核的线又高了一次」。
+/// hv_vcpu_set_pending_interrupt 必须在管着这个 vCPU 的线程上调用，跨线程调会被拒，
+/// 表现就是多核起好后第一个 IPI 收不到——日志里停在 alternatives 之后就再也没有动静。
+- (void)recordIRQLine:(BOOL)asserted forCPU:(NSUInteger)index {
+	if (index >= VLMaximumCPUs) {
+		return;
+	}
+	if (!asserted) {
+		return;
+	}
+	[_startCondition lock];
+	_irqLineGeneration[index]++;
+	[_startCondition unlock];
+}
+
+/// 由各核自己的线程调用：有新的一代上升沿就把 pending 置上。
+- (void)injectPendingIRQForCPU:(NSUInteger)index vcpu:(uint64_t)vcpu {
+	[_startCondition lock];
+	uint64_t generation = _irqLineGeneration[index];
+	BOOL needed = generation != _irqLineAppliedGeneration[index];
+	if (needed) {
+		_irqLineAppliedGeneration[index] = generation;
+	}
+	[_startCondition unlock];
+	if (!needed) {
+		return;
+	}
+	int32_t result = [_hypervisor setPendingIRQ:YES forVCPU:vcpu];
+	if (result != 0 && _irqInjectFailureCount < 4) {
+		_irqInjectFailureCount++;
+		[VLStartupLog log:@"下发中断失败（0x%x）：核 %lu", (unsigned)result, (unsigned long)index];
+	}
 }
 
 - (void)parseDisplayResolution {
@@ -627,12 +673,7 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		if (strongSelf == nil) {
 			return;
 		}
-		[strongSelf->_startCondition lock];
-		uint64_t vcpu = cpuIndex < strongSelf->_cpuCount ? strongSelf->_slots[cpuIndex].vcpu : 0;
-		[strongSelf->_startCondition unlock];
-		if (vcpu != 0) {
-			[strongSelf->_hypervisor setPendingIRQ:asserted forVCPU:vcpu];
-		}
+		[strongSelf recordIRQLine:asserted forCPU:cpuIndex];
 	};
 	[_deviceBus addDevice:_interruptController];
 
@@ -746,6 +787,8 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 		// 每次退出都可能产生临时对象（画面数据），按迭代回收，避免长期运行内存一直涨。
 		@autoreleasepool {
 			__atomic_add_fetch(&_totalExits, 1, __ATOMIC_RELAXED);
+			// 设备侧只记了中断线的上升沿，真正下发给 HVF 必须在本线程、进客户机之前做。
+			[self injectPendingIRQForCPU:cpuIndex vcpu:vcpu];
 			int32_t result = [_hypervisor runVCPU:vcpu];
 			if (result != 0) {
 				[self reportFailure:[NSString stringWithFormat:@"hv_vcpu_run 失败（0x%x）", (unsigned)result]];
