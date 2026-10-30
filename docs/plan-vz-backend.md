@@ -1,14 +1,21 @@
-# 计划：Virtualization.framework 作为第二后端
+# 计划：Virtualization.framework 作为扩展包（独立仓库）
 
-状态：待启动（大活）。本文只定方案与验收门，不含实现。
+状态：**暂缓**。当前先做 `plan-paravirt.md`（自研栈更半虚拟化），本文只定方案与验收门，不含实现。
+
+## 0. 仓库边界（决定）
+
+- **主包（本仓库）不动**：只保留自研栈（HVF），不包含、不打包任何 Apple 抽取的二进制。主包只做一件事——按协议 `dlopen` 扩展包，加载不到就当它不存在。
+- **VF 能力独立成包**：新建一个独立仓库，产物是一个独立 deb（扩展包），内含 `Virtualization.framework` 抽取产物与 `VZMachineBackend` 实现。
+- 两者只通过**一个协议**发生关系：主包定义 `VLMachineBackend`；扩展包以动态库形式实现它，主包运行时按需加载，加载不到就当它不存在。
+- 这样做的意义：发行物把「我们的代码」和「Apple 的版权物」物理分开，主包保持可主张的自主权，扩展包定位研究/实验，不进主包宣传。
 
 ## 1. 目标与非目标
 
 目标：
 
-- 在现有 App 里增加一个 **VZ 后端**：把 macOS 的 `Virtualization.framework` 从 dyld 共享缓存抽出来、restamp 到 iPadOS，用它引导 Linux 客户机。
+- 提供 **VZ 后端扩展包**：把 macOS 的 `Virtualization.framework` 从 dyld 共享缓存抽出来、restamp 到 iPadOS，用它引导 Linux 客户机。
 - 两个后端对上层**完全等价**：同一套 UI、同一份 VM 配置、**同一块磁盘镜像**，启动前选后端即可。
-- 后端不可用时自动回落到自研后端，用户不受影响。
+- 扩展包未安装或不可用时，主包行为与现在**完全一致**（自研后端）。
 
 非目标：
 
@@ -30,19 +37,25 @@
 
 代价：黑盒。出问题不能再「读日志对内核源码」。所以 VZ 后端**只作为第二选项**，自研栈保留为默认与兜底。
 
-## 3. 架构
+## 3. 架构（跨仓库）
 
-现状：`VLLinuxVirtualMachine` 既是编排者又是 HVF 后端，UI 直接依赖它。
+主包需要先做一次纯重构，把 `VLLinuxVirtualMachine` 收敛成「后端」，UI 只依赖协议。本仓库内**只做这一步**，VF 实现放在独立仓库。
 
-改为三层：
+协议放在主包，实现分开：
 
 ```
+主包（本仓库）
 UI（VLDetailViewController / VLFullScreenViewController / VLKeyboardInput）
    ↓ 只依赖协议
 VLMachineBackend（协议）        ← 状态、状态文字、显示尺寸、串口行、触摸、启停、delegate
    ├── VLHypervisorMachine       ← 现有 VLLinuxVirtualMachine，改名并收敛为后端
-   └── VZMachineBackend          ← 新增：VZ 后端
+   └── （运行时）dlopen 扩展包 → VZMachineBackend
+
+扩展包（独立仓库 + 独立 deb）
+VZMachineBackend（实现 VLMachineBackend）+ 抽取的 Apple framework
 ```
+
+主包不链接、不打包任何 VF 相关代码；扩展包缺失时 `dlopen` 返回空，`auto` 直接走 native。
 
 `VLMachineBackend` 需覆盖的成员（与现有 UI 调用一一对应）：
 
@@ -59,9 +72,10 @@ VM 配置增加一个字段 `backend`（`auto` / `native` / `vz`），默认 `au
 
 ### 阶段 0：可行性探针（最先做，单独可交付）
 
-- `dlsym` 探测：`hv_gic_*`（vGIC）、`Virtualization.framework` 是否可加载（`dlopen` 私有路径 + 符号存在性）。
+- `dlsym` 探测：`Virtualization.framework` 是否可加载（`dlopen` 私有路径 + `VZVirtualMachine` 类存在性）。
 - 结果写进 `startup.log`，并在 App 内可见（详情页「诊断」一节即可）。
-- **验收门**：拿到设备上确切的「有 / 无」结论。没有 vGIC 也不影响 VZ 后端（VZ 自带），但决定自研栈是否也能吃上 vGIC。
+- vGIC 探针（`hv_gic_*`）归 `plan-paravirt.md` 阶段 0，不重复做。
+- **验收门**：拿到设备上确切的「有 / 无」结论。无 → 整个 VZ 计划终止，主包毫发无损。
 
 ### 阶段 1：构建期抽取管线
 
