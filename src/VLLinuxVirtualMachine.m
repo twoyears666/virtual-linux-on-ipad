@@ -1158,6 +1158,13 @@ static uint64_t VLGuestCounterValue(void) {
 	uint64_t function = 0;
 	[_hypervisor getRegister:0 value:&function forVCPU:vcpu];
 
+	// PSCI 的 64 位变体就是在 32 位功能号上多了 bit30（0x8400000X → 0xC400000X）。
+	// arm64 内核统一用 64 位变体（CPU_ON 实际是 0xC4000003），只认 0x8400000X
+	// 会让次级核的 CPU_ON 落到「不支持」，日志里就是 psci: failed to boot CPU1 (-95)。
+	if ((function & 0x40000000ULL) != 0) {
+		function &= ~0x40000000ULL;
+	}
+
 	uint64_t result = VL_PSCI_RET_NOT_SUPPORTED;
 
 	if (function == VL_PSCI_VERSION) {
@@ -1211,10 +1218,11 @@ static uint64_t VLGuestCounterValue(void) {
 		return VL_PSCI_RET_INVALID_PARAMETERS;
 	}
 
+	// 这里不要求槽位的 vCPU 已经建好：内核在启动早期就会调 CPU_ON，比我们开线程还早。
+	// 先把开机请求记下来，等那个核的线程建完 vCPU 自己会看到这个标志直接开机。
 	[_startCondition lock];
-	BOOL created = _slots[index].created;
-	BOOL alreadyOn = _slots[index].startRequested;
-	if (created && !alreadyOn && !_slots[index].finished) {
+	BOOL alreadyOn = _slots[index].startRequested || _slots[index].finished;
+	if (!alreadyOn) {
 		_slots[index].startPC = entry;
 		_slots[index].startContextID = contextID;
 		_slots[index].startRequested = YES;
@@ -1222,9 +1230,6 @@ static uint64_t VLGuestCounterValue(void) {
 	}
 	[_startCondition unlock];
 
-	if (!created) {
-		return VL_PSCI_RET_INVALID_PARAMETERS;
-	}
 	return alreadyOn ? VL_PSCI_RET_ALREADY_ON : 0;
 }
 

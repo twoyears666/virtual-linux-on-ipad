@@ -3,10 +3,8 @@
 #import <math.h>
 
 #import "VLDashedPlaceholderView.h"
-#import "VLDisplayView.h"
 #import "VLFullScreenViewController.h"
 #import "VLHostCapabilities.h"
-#import "VLKeyboardInput.h"
 #import "VLLinuxVirtualMachine.h"
 #import "VLLog.h"
 #import "VLStartupLog.h"
@@ -25,9 +23,6 @@
 @property (nonatomic, strong) UILabel *statusLabel;
 
 @property (nonatomic, strong) VLLinuxVirtualMachine *virtualMachine;
-@property (nonatomic, strong) VLDisplayView *displayView;
-/// 系统键盘 → 客户机按键；输入框挂在当前显示的页面上。
-@property (nonatomic, strong) VLKeyboardInput *keyboardInput;
 /// 运行时的独立全屏页面；启动成功后立刻切过去。
 @property (nonatomic, strong) VLFullScreenViewController *fullScreenController;
 /// 用户自己点过「退出全屏」：别再自动弹回去，等下次启动再说。
@@ -113,15 +108,16 @@
 		[self.stackView addArrangedSubview:[self frozenBannerView]];
 	}
 
-	// 客户机跑起来就换成真实画面（4:3），没跑时用虚线框占位，点按即启动。
+	// 客户机画面只在独立全屏页里显示，详情页不再放一块黑色预览窗：
+	// 跑起来就换成一张「运行中」的入口卡，点一下就回到画面。
 	if ([self isMachineActive]) {
-		[self.stackView addArrangedSubview:[self displayAreaView]];
+		[self.stackView addArrangedSubview:[self runningEntryCard]];
 	} else {
 		VLDashedPlaceholderView *placeholder = [[VLDashedPlaceholderView alloc] init];
 		placeholder.translatesAutoresizingMaskIntoConstraints = NO;
 		placeholder.text = frozen
 			? @"已冻结\n存放位置不可用，恢复目录后自动解冻"
-			: [NSString stringWithFormat:@"虚拟机截图\n运行后在此显示 %@ 的客户机画面", configuration.resolutionString];
+			: [NSString stringWithFormat:@"点按启动虚拟机\n画面会显示在独立的全屏页面里（%@）", configuration.resolutionString];
 		__weak typeof(self) weakSelf = self;
 		if (!frozen) {
 			placeholder.onTap = ^{
@@ -791,82 +787,39 @@
 	return message.length > 0 ? message : @"未运行";
 }
 
-/// 画面区：复用同一个 VLDisplayView，重建界面时不会丢掉最后一帧。
-- (UIView *)displayAreaView {
-	VLDisplayView *display = self.displayView;
-	if (display == nil) {
-		display = [[VLDisplayView alloc] init];
-		self.displayView = display;
-	}
-	// 有画面时状态文字会盖在图上，只在没画面时更新。
-	if (!display.hasFrame) {
-		display.statusText = [self machineStatusText];
-	}
+/// 运行中的入口卡：详情页不预览画面（那是全屏页的事），只留一个回去的入口。
+- (UIView *)runningEntryCard {
+	UILabel *status = [[UILabel alloc] init];
+	status.text = [self machineStatusText];
+	status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+	status.textColor = UIColor.secondaryLabelColor;
+	status.numberOfLines = 0;
+	[status setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+											forAxis:UILayoutConstraintAxisHorizontal];
 
-	__weak typeof(self) weakSelf = self;
-	display.touchHandler = ^(VLDisplayTouchPhase phase, CGFloat x, CGFloat y) {
-		typeof(self) strongSelf = weakSelf;
-		VLLinuxVirtualMachine *machine = strongSelf.virtualMachine;
-		if (machine == nil) {
-			return;
-		}
-		switch (phase) {
-			case VLDisplayTouchPhaseBegan:
-				[machine sendTouchBeganAtNormalizedX:x y:y];
-				break;
-			case VLDisplayTouchPhaseMoved:
-				[machine sendTouchMovedToNormalizedX:x y:y];
-				break;
-			case VLDisplayTouchPhaseEnded:
-				[machine sendTouchEnded];
-				break;
-		}
-	};
+	UIButton *enterButton = [UIButton buttonWithType:UIButtonTypeSystem];
+	[enterButton setTitle:@"进入画面" forState:UIControlStateNormal];
+	enterButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+	[enterButton addTarget:self action:@selector(enterScreenTapped) forControlEvents:UIControlEventTouchUpInside];
+	[enterButton setContentHuggingPriority:UILayoutPriorityRequired
+								   forAxis:UILayoutConstraintAxisHorizontal];
 
-	UIView *container = [[UIView alloc] init];
-	container.translatesAutoresizingMaskIntoConstraints = NO;
-	display.translatesAutoresizingMaskIntoConstraints = NO;
-	[container addSubview:display];
+	UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[ status, enterButton ]];
+	row.axis = UILayoutConstraintAxisHorizontal;
+	row.alignment = UIStackViewAlignmentCenter;
+	row.spacing = 12.0;
 
-	// 「键盘」按钮浮在画面右下角：点一下弹出系统键盘，敲的字送进客户机。
-	UIButton *keyboardButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	keyboardButton.translatesAutoresizingMaskIntoConstraints = NO;
-	[keyboardButton setTitle:@"键盘" forState:UIControlStateNormal];
-	keyboardButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-	[keyboardButton setTitleColor:UIColor.labelColor forState:UIControlStateNormal];
-	keyboardButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.85];
-	keyboardButton.layer.cornerRadius = 8.0;
-	[keyboardButton addTarget:self action:@selector(keyboardButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-	[container addSubview:keyboardButton];
-
-	[NSLayoutConstraint activateConstraints:@[
-		[display.topAnchor constraintEqualToAnchor:container.topAnchor],
-		[display.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-		[display.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-		[display.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
-		[container.heightAnchor constraintEqualToAnchor:container.widthAnchor multiplier:0.75],
-		[keyboardButton.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-8.0],
-		[keyboardButton.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-8.0],
-		[keyboardButton.widthAnchor constraintEqualToConstant:64.0],
-		[keyboardButton.heightAnchor constraintEqualToConstant:32.0],
-	]];
-	return container;
+	return [self cardWithTitle:@"虚拟机运行中" rows:@[ row ]];
 }
 
-#pragma mark - 键盘输入
-
-- (VLKeyboardInput *)keyboardInput {
-	if (_keyboardInput == nil) {
-		_keyboardInput = [[VLKeyboardInput alloc] initWithMachine:self.virtualMachine];
+- (void)enterScreenTapped {
+	// 客户机还没建起来（刚点启动、正在初始化）就当作再次启动处理。
+	if (self.virtualMachine == nil) {
+		[self startTapped];
+		return;
 	}
-	return _keyboardInput;
-}
-
-- (void)keyboardButtonTapped {
-	// 换过机器就跟着换目标；输入框挂在当前这一页上。
-	self.keyboardInput.machine = self.virtualMachine;
-	[self.keyboardInput attachToView:self.view];
-	[self.keyboardInput show];
+	self.fullScreenSuppressedByUser = NO;
+	[self presentFullScreenIfPossible];
 }
 
 #pragma mark - 启动
@@ -916,6 +869,15 @@
 	if (self.fullScreenSuppressedByUser) {
 		return;
 	}
+	// 页面还没真正上屏（例如刚选中虚拟机、窗口还没挂上）时立刻 present 会被系统丢掉，
+	// 结果就是只留下一条状态、看不到全屏页。等一个 runloop 再试。
+	if (self.view.window == nil) {
+		__weak typeof(self) weakSelf = self;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[weakSelf presentFullScreenIfPossible];
+		});
+		return;
+	}
 
 	VLFullScreenViewController *controller =
 		[[VLFullScreenViewController alloc] initWithMachine:self.virtualMachine];
@@ -956,7 +918,6 @@
 		return;
 	}
 	if (state == VLVirtualMachineStateStopped || state == VLVirtualMachineStateFailed) {
-		[self.displayView clearFrame];
 		[self.fullScreenController clearFrame];
 	}
 	if (state == VLVirtualMachineStateStopped) {
@@ -1015,10 +976,7 @@
 	if (machine != self.virtualMachine) {
 		return;
 	}
-	if (self.displayView.superview == nil) {
-		[self rebuildContent];
-	}
-	[self.displayView updateWithWidth:width height:height frame:data];
+	// 画面只往全屏页面送；详情页不再预览，所以这里不重建界面。
 	[self.fullScreenController updateFrameWidth:width height:height data:data];
 }
 
