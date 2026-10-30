@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import "VLVirtioMMIODevice.h"
 
 /// virtio-blk（legacy）：把客户机的块读写落到一块磁盘镜像文件上。

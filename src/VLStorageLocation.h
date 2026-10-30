@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <Foundation/Foundation.h>
 
 /// 一个虚拟机存放位置，例如 App 文档目录，或外接磁盘上用户自选的文件夹。

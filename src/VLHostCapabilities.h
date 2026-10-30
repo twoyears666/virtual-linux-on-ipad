@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <Foundation/Foundation.h>
 
 /// 探测运行环境是否具备硬件虚拟化条件。

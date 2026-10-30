@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <Foundation/Foundation.h>
 
 /// 一块虚拟磁盘。一台虚拟机可以挂多块盘，各自独立容量与镜像文件。

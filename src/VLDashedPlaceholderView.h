@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <UIKit/UIKit.h>
 
 /// 虚线占位框，用来标记「这里应该放一张图」。

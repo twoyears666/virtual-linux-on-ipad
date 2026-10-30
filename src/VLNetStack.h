@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <Foundation/Foundation.h>
 
 /// 极简用户态网络：给 virtio-net 提供出站 NAT，不依赖任何第三方库。

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import "VLLog.h"
 
 #import <UIKit/UIKit.h>

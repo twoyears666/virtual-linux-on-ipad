@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <Foundation/Foundation.h>
 
 // 启动/崩溃日志工具：把阶段埋点追加到 <虚拟机目录>/logs/startup.log，

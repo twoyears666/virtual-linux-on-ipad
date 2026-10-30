@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <UIKit/UIKit.h>
 
 /// 发行版图标映射：用 SF Symbols 表现常见发行版，不内置真实 logo 资源。

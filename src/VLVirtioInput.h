@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import "VLVirtioMMIODevice.h"
 
 /// virtio-input：对外表现为一块单点触摸屏，App 把手指位置换算成绝对坐标事件送给客户机。

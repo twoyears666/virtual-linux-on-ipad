@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import <Foundation/Foundation.h>
 
 /// 统一日志：所有运行期信息追加到 <虚拟机目录>/logs/app.log，超过大小自动滚动一份。

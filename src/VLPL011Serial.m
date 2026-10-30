@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 twoyears666
+
 #import "VLPL011Serial.h"
 
 static const uint32_t VLPL011DataRegister = 0x000;

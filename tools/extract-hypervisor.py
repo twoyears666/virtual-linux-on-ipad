@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 twoyears666
+
 """从本机 dyld 共享缓存抽出 Hypervisor.framework，改成 iOS 可加载形态并用 ldid 重签。
 
 macOS 15 起 Hypervisor 二进制不再以文件形式落在磁盘上，只在 dyld 共享缓存里，
