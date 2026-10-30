@@ -292,9 +292,10 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 
 #pragma mark - 中断线
 
-/// 设备侧的中断线变化：只记「这个核的线又高了一次」。
-/// hv_vcpu_set_pending_interrupt 必须在管着这个 vCPU 的线程上调用，跨线程调会被拒，
-/// 表现就是多核起好后第一个 IPI 收不到——日志里停在 alternatives 之后就再也没有动静。
+/// 设备侧的中断线变化：只记「这个核的线又高了一次」，并把目标核从 hv_vcpu_run 里踢出来。
+/// hv_vcpu_set_pending_interrupt 必须在管着这个 vCPU 的线程上调用（跨线程调会被拒），
+/// 而 pending 中断也只在「进客户机」那一刻生效——目标核很可能正躺在 run 里自旋等中断
+/// （stop_machine 就是这样），不踢出来就永远轮不到下发，多核会卡死在第一个 IPI。
 - (void)recordIRQLine:(BOOL)asserted forCPU:(NSUInteger)index {
 	if (index >= VLMaximumCPUs) {
 		return;
@@ -302,9 +303,16 @@ static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	if (!asserted) {
 		return;
 	}
+	uint64_t vcpu = 0;
 	[_startCondition lock];
 	_irqLineGeneration[index]++;
+	if (index < _cpuCount) {
+		vcpu = _slots[index].vcpu;
+	}
 	[_startCondition unlock];
+	if (vcpu != 0) {
+		[_hypervisor exitVCPUs:&vcpu count:1];
+	}
 }
 
 /// 由各核自己的线程调用：有新的一代上升沿就把 pending 置上。
