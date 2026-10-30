@@ -32,9 +32,7 @@
 /// 用来确认「虚拟机把整机 CPU 吃满、系统服务被饿死」这条链路是否真的发生。
 + (double)cpuPercentSinceLastSample;
 
-/// 客机内存上限：本机内存的一半，且至少给系统留 2 GB，按 512 MB 取整。
-/// 留得不够，前台就会把系统服务（例如媒体服务）挤到被 jetsam 杀掉——
-/// 表现是全机没声音，只有强退占用内存的 App 才恢复。
+/// 客机内存上限：本机 75% 与「本机内存 - 1 GB」取小，按 512 MB 取整。
 + (NSUInteger)maximumGuestMemoryMB;
 
 @end
