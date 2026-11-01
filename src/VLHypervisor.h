@@ -90,4 +90,14 @@ typedef NS_OPTIONS(uint32_t, VLHypervisorMemoryFlags) {
 /// 设置待处理的 IRQ。GIC 处理完一次中断后要把 pending 清掉。
 - (int32_t)setPendingIRQ:(BOOL)pending forVCPU:(uint64_t)vcpu;
 
+/// 解除 / 打开虚拟定时器的掩码（hv_vcpu_set_vtimer_mask）。
+/// HVF 在客户机虚拟定时器到期时会先退出（VTIMER_ACTIVATED）并把定时器自动屏蔽，
+/// 必须由 VMM 显式解除屏蔽，否则这个核只会收到一次定时器中断，之后的 wait /
+/// 超时 / 调度 tick 全部停止——多核启动就会卡在等 1 秒超时那一步。
+/// 运行时没有这个符号时返回 -1。
+- (int32_t)setVTimerMask:(BOOL)masked forVCPU:(uint64_t)vcpu;
+
+/// 运行时是否提供 hv_vcpu_set_vtimer_mask。
+@property (nonatomic, readonly) BOOL vtimerMaskAvailable;
+
 @end

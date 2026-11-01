@@ -20,6 +20,7 @@ typedef int32_t (*VLExitVCPUs)(uint64_t *, uint32_t);
 typedef int32_t (*VLSetRegister)(uint64_t, uint32_t, uint64_t);
 typedef int32_t (*VLGetRegister)(uint64_t, uint32_t, uint64_t *);
 typedef int32_t (*VLSetPendingInterrupt)(uint64_t, uint32_t, bool);
+typedef int32_t (*VLSetVTimerMask)(uint64_t, bool);
 
 @interface VLHypervisor ()
 
@@ -44,6 +45,7 @@ typedef int32_t (*VLSetPendingInterrupt)(uint64_t, uint32_t, bool);
 	VLSetRegister _setRegister;
 	VLGetRegister _getRegister;
 	VLSetPendingInterrupt _setPendingInterrupt;
+	VLSetVTimerMask _setVTimerMask;
 }
 
 + (instancetype)shared {
@@ -103,6 +105,7 @@ typedef int32_t (*VLSetPendingInterrupt)(uint64_t, uint32_t, bool);
 		_setRegister = (VLSetRegister)dlsym(handle, "hv_vcpu_set_reg");
 		_getRegister = (VLGetRegister)dlsym(handle, "hv_vcpu_get_reg");
 		_setPendingInterrupt = (VLSetPendingInterrupt)dlsym(handle, "hv_vcpu_set_pending_interrupt");
+		_setVTimerMask = (VLSetVTimerMask)dlsym(handle, "hv_vcpu_set_vtimer_mask");
 
 		BOOL complete = _createVM != NULL && _destroyVM != NULL && _mapMemory != NULL &&
 			_unmapMemory != NULL && (_createVCPULegacy != NULL || _createVCPUWithConfig != NULL) &&
@@ -246,6 +249,18 @@ typedef int32_t (*VLSetPendingInterrupt)(uint64_t, uint32_t, bool);
 		return -1;
 	}
 	return _getRegister(vcpu, reg, value);
+}
+
+- (BOOL)vtimerMaskAvailable {
+	return _setVTimerMask != NULL;
+}
+
+- (int32_t)setVTimerMask:(BOOL)masked forVCPU:(uint64_t)vcpu {
+	if (_setVTimerMask == NULL) {
+		return -1;
+	}
+	// 签名是 hv_vcpu_set_vtimer_mask(hv_vcpu_t, bool vtimer_is_masked)。
+	return _setVTimerMask(vcpu, (bool)masked);
 }
 
 - (int32_t)setPendingIRQ:(BOOL)pending forVCPU:(uint64_t)vcpu {

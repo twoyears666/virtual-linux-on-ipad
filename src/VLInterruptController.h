@@ -25,6 +25,10 @@ void VLSetProcessorIndexForCurrentThread(uint32_t index);
 /// 某个核的中断线状态变化时回调，上层据此调 hv_vcpu_set_pending_interrupt。
 @property (nonatomic, copy) void (^irqLineHandler)(uint32_t cpuIndex, BOOL asserted);
 
+/// 某个核写完 GICC_EOIR（中断处理结束）时回调。虚拟定时器就靠它解除 HVF 的掩码：
+/// 客户机在 EOIR 之前已经把下一次到期时间写回 CNTV_CVAL_EL0 了。
+@property (nonatomic, copy) void (^interruptEndHandler)(uint32_t cpuIndex, uint32_t irq);
+
 /// 由设备触发（例如 virtio 写完 used ring）。SGI / PPI 挂在当前线程所在的核上，
 /// SPI 挂到分发器上再按 GICD_ITARGETSR 路由给目标核。
 - (void)setIRQPending:(uint32_t)irq;

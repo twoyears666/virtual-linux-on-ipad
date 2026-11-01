@@ -76,6 +76,9 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	BOOL _lineAsserted[VLGIC_MAXIMUM_CPUS];
 	/// 第一次核间中断留一行日志，用来确认多核是不是真走到 IPI 这一步。
 	NSUInteger _sgiLogCount;
+	/// 中断线变化和 IAR 确认各只记前 16 条：卡死时看这两组日志就知道中断到底送到了没。
+	NSUInteger _lineLogCount;
+	NSUInteger _ackLogCount;
 	NSUInteger _cpuCount;
 }
 
@@ -180,11 +183,17 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 
 - (void)refreshLines {
 	for (NSUInteger cpu = 0; cpu < _cpuCount; cpu++) {
-		BOOL asserted = [self highestPendingInterruptForCPU:(uint32_t)cpu] != VLGICSpuriousIRQ;
+		uint32_t highest = [self highestPendingInterruptForCPU:(uint32_t)cpu];
+		BOOL asserted = highest != VLGICSpuriousIRQ;
 		if (asserted == _lineAsserted[cpu]) {
 			continue;
 		}
 		_lineAsserted[cpu] = asserted;
+		if (_lineLogCount < 16) {
+			_lineLogCount++;
+			[VLStartupLog log:@"GIC 中断线：核 %lu %@（最高挂起中断 %u）",
+						  (unsigned long)cpu, asserted ? @"拉高" : @"拉低", highest];
+		}
 		if (self.irqLineHandler != nil) {
 			self.irqLineHandler((uint32_t)cpu, asserted);
 		}
@@ -266,6 +275,10 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	}
 	[self setInterrupt:irq pending:NO forCPU:cpu];
 	_active[cpu * VLGIC_MAXIMUM_IRQ + irq] = YES;
+	if (_ackLogCount < 16) {
+		_ackLogCount++;
+		[VLStartupLog log:@"GIC 确认中断：核 %u 拿到 %u", cpu, irq];
+	}
 	// ack 之后中断线可能还有别的挂起中断，但要等这次 EOI 完再报，避免重复注入。
 	[self refreshLines];
 	return irq;
@@ -290,6 +303,10 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 		uint32_t irq = value & 0x3FF;
 		if (irq < VLGIC_MAXIMUM_IRQ) {
 			_active[cpu * VLGIC_MAXIMUM_IRQ + irq] = NO;
+			// 先回调再刷新线：回调里可能解除定时器掩码，让客户机马上又能收到下一次 tick。
+			if (self.interruptEndHandler != nil) {
+				self.interruptEndHandler(cpu, irq);
+			}
 			[self refreshLines];
 		}
 		return;

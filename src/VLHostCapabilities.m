@@ -5,6 +5,7 @@
 
 #import <dlfcn.h>
 #import <mach/mach.h>
+#import <mach/mach_time.h>
 #import <os/proc.h>
 #import <sys/sysctl.h>
 
@@ -154,15 +155,16 @@ static void *VLHypervisorHandle(NSString **outPath) {
 	static double lastCPUSeconds = 0;
 	static NSTimeInterval lastWallSeconds = 0;
 
-	task_basic_info_data_t info;
-	mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
-	if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+	// TASK_BASIC_INFO 里的 user/system_time 在 iOS 上常年是 0（日志里「CPU 0%」但退出
+	// 上万次/秒就是这么来的）。TASK_ABSOLUTETIME_INFO 给的是累计 CPU 时间，单位是
+	// mach 绝对时间，要按 timebase 换算成秒。
+	uint64_t ticks = 0;
+	BOOL measured = [self absoluteTimeSinceBoot:&ticks];
+	NSTimeInterval wallSeconds = NSProcessInfo.processInfo.systemUptime;
+	if (!measured) {
 		return 0;
 	}
-
-	double cpuSeconds = (double)(info.user_time.seconds + info.system_time.seconds) +
-		(double)(info.user_time.microseconds + info.system_time.microseconds) / 1000000.0;
-	NSTimeInterval wallSeconds = NSProcessInfo.processInfo.systemUptime;
+	double cpuSeconds = [self secondsFromMachTicks:ticks];
 	double percent = 0;
 	if (lastWallSeconds > 0 && wallSeconds > lastWallSeconds) {
 		percent = (cpuSeconds - lastCPUSeconds) / (wallSeconds - lastWallSeconds) * 100.0;
@@ -170,6 +172,25 @@ static void *VLHypervisorHandle(NSString **outPath) {
 	lastCPUSeconds = cpuSeconds;
 	lastWallSeconds = wallSeconds;
 	return percent;
+}
+
+/// 本进程累计消耗的 CPU 时间（user + system），单位是 mach 绝对时间。
++ (BOOL)absoluteTimeSinceBoot:(uint64_t *)ticks {
+	task_absolutetime_info_data_t info;
+	mach_msg_type_number_t count = TASK_ABSOLUTETIME_INFO_COUNT;
+	if (task_info(mach_task_self(), TASK_ABSOLUTETIME_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+		return NO;
+	}
+	*ticks = info.total_user + info.total_system;
+	return YES;
+}
+
++ (double)secondsFromMachTicks:(uint64_t)ticks {
+	static mach_timebase_info_data_t timebase;
+	if (timebase.denom == 0) {
+		mach_timebase_info(&timebase);
+	}
+	return (double)ticks * (double)timebase.numer / (double)timebase.denom / 1e9;
 }
 
 + (NSUInteger)maximumGuestMemoryMB {

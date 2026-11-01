@@ -136,6 +136,19 @@ static NSString *VLCPURestName(uint32_t reason) {
 	BOOL _irqLineApplied[VLMaximumCPUs];
 	NSUInteger _irqInjectFailureCount;
 
+	/// HVF 在 VTIMER_ACTIVATED 退出后会自动把该核的虚拟定时器屏蔽住，只有我们显式解除
+	/// 才会再响。这里记「哪个核的定时器还处于被屏蔽状态」，等客户机 EOI 掉 INTID 27
+	/// （此时它已经把下一次到期时间写回 CNTV_CVAL_EL0）再解除。
+	BOOL _vtimerMasked[VLMaximumCPUs];
+	NSUInteger _vtimerPendingCount;
+	NSUInteger _vtimerLogCount;
+	NSUInteger _vtimerUnmaskFailureCount;
+
+	/// WFI 上「连着等了多久」的计数（一次 ≈ 1 ms），到 0.5 秒记一行，
+	/// 卡死时直接看出核停在哪个 PC、是不是在等一个永远不来的中断。
+	NSUInteger _wfiWaits[VLMaximumCPUs];
+	NSUInteger _wfiStallLogCount;
+
 	BOOL _stopRequested;
 	BOOL _framePending;
 	uint64_t _guestMemorySize;
@@ -224,6 +237,12 @@ static NSString *VLCPURestName(uint32_t reason) {
 	memset(_irqLineLevel, 0, sizeof(_irqLineLevel));
 	memset(_irqLineApplied, 0, sizeof(_irqLineApplied));
 	_irqInjectFailureCount = 0;
+	memset(_vtimerMasked, 0, sizeof(_vtimerMasked));
+	_vtimerPendingCount = 0;
+	_vtimerLogCount = 0;
+	_vtimerUnmaskFailureCount = 0;
+	memset(_wfiWaits, 0, sizeof(_wfiWaits));
+	_wfiStallLogCount = 0;
 	[_startCondition unlock];
 	[self parseDisplayResolution];
 	[self reportState:VLVirtualMachineStateStarting message:@"创建虚拟硬件…"];
@@ -236,7 +255,8 @@ static NSString *VLCPURestName(uint32_t reason) {
 	return YES;
 }
 
-/// 每 30 秒量一次自身的 CPU / 内存占用。用 UTILITY 队列上的定时器，少干扰客户机。
+/// 每 10 秒量一次自身的 CPU / 内存占用。用 UTILITY 队列上的定时器，少干扰客户机。
+/// 10 秒而不是 30 秒：真机日志常常是卡住后很快就抓走，30 秒的采样行往往根本不存在。
 - (void)startUsageSampling {
 	if (_usageTimer != NULL) {
 		return;
@@ -246,9 +266,9 @@ static NSString *VLCPURestName(uint32_t reason) {
 	_usageTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
 										 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
 	dispatch_source_set_timer(_usageTimer,
-							  dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)),
-							  (uint64_t)(30 * NSEC_PER_SEC),
-							  (uint64_t)(5 * NSEC_PER_SEC));
+							  dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
+							  (uint64_t)(10 * NSEC_PER_SEC),
+							  (uint64_t)(2 * NSEC_PER_SEC));
 	__weak typeof(self) weakSelf = self;
 	dispatch_source_set_event_handler(_usageTimer, ^{
 		typeof(self) strongSelf = weakSelf;
@@ -266,7 +286,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 	uint64_t exits = __atomic_load_n(&_totalExits, __ATOMIC_RELAXED);
 	uint64_t delta = exits - _sampledExits;
 	_sampledExits = exits;
-	[VLStartupLog log:@"运行采样：CPU %.0f%%（%lu 核），占用 %lu MB，可用 %lu MB，退出 %llu 次/30 秒；各核 %@",
+	[VLStartupLog log:@"运行采样：CPU %.0f%%（%lu 核），占用 %lu MB，可用 %lu MB，退出 %llu 次/10 秒；各核 %@",
 	 (double)cpuPercent, (unsigned long)_cpuCount,
 	 (unsigned long)[VLHostCapabilities residentMemoryMB],
 	 (unsigned long)[VLHostCapabilities availableMemoryMB],
@@ -378,6 +398,32 @@ static NSString *VLCPURestName(uint32_t reason) {
 	if (result != 0 && _irqInjectFailureCount < 4) {
 		_irqInjectFailureCount++;
 		[VLStartupLog log:@"下发中断失败（0x%x）：核 %lu", (unsigned)result, (unsigned long)index];
+	}
+}
+
+/// 客户机 EOI 掉虚拟定时器中断（INTID 27）时解除 HVF 的定时器掩码。
+/// 必须在跑这个 vCPU 的线程上调用；EOIR 正是这条线程处理 MMIO 时写进来的，天然满足。
+/// 客户机在 EOIR 之前已经把下一次到期时间写回 CNTV_CVAL_EL0，所以这一刻解除不会立刻重复触发。
+- (void)interruptEndedForCPU:(uint32_t)cpuIndex irq:(uint32_t)irq {
+	if (irq != VLPPIVirtualTimer || cpuIndex >= VLMaximumCPUs) {
+		return;
+	}
+	uint64_t vcpu = 0;
+	[_startCondition lock];
+	BOOL wasMasked = _vtimerMasked[cpuIndex];
+	_vtimerMasked[cpuIndex] = NO;
+	if (cpuIndex < _cpuCount) {
+		vcpu = _slots[cpuIndex].vcpu;
+	}
+	[_startCondition unlock];
+
+	if (!wasMasked || vcpu == 0) {
+		return;
+	}
+	int32_t result = [_hypervisor setVTimerMask:NO forVCPU:vcpu];
+	if (result != 0 && _vtimerUnmaskFailureCount < 3) {
+		_vtimerUnmaskFailureCount++;
+		[VLStartupLog log:@"解除虚拟定时器掩码失败（0x%x）：核 %u", (unsigned)result, cpuIndex];
 	}
 }
 
@@ -556,6 +602,8 @@ static NSString *VLCPURestName(uint32_t reason) {
 	 (unsigned long)[VLHostCapabilities physicalMemoryMB],
 	 (unsigned long)[VLHostCapabilities availableMemoryMB],
 	 (unsigned long)[VLHostCapabilities residentMemoryMB]];
+	[VLStartupLog log:@"虚拟定时器掩码接口：%@",
+	 _hypervisor.vtimerMaskAvailable ? @"可用" : @"不可用（每个核只会有一次定时器中断）"];
 
 	// 界面里的「CPU 核心数」在这里真正生效：0 号核直接开机，其余核等 PSCI CPU_ON。
 	NSUInteger requestedCores = MAX((NSUInteger)1, _configuration.cpuCores);
@@ -730,6 +778,13 @@ static NSString *VLCPURestName(uint32_t reason) {
 		}
 		[strongSelf recordIRQLine:asserted forCPU:cpuIndex];
 	};
+	_interruptController.interruptEndHandler = ^(uint32_t cpuIndex, uint32_t irq) {
+		typeof(self) strongSelf = weakSelf;
+		if (strongSelf == nil) {
+			return;
+		}
+		[strongSelf interruptEndedForCPU:cpuIndex irq:irq];
+	};
 	[_deviceBus addDevice:_interruptController];
 
 	_serial = [[VLPL011Serial alloc] initWithBaseAddress:VLUARTBase];
@@ -893,6 +948,18 @@ static NSString *VLCPURestName(uint32_t reason) {
 			}
 			if (reason == VLHypervisorExitReasonVTimer) {
 				// 客户机虚拟定时器到期：把 INTID 27（EL1 虚拟定时器 PPI）挂到本核的 GIC 上。
+				// 注意 HVF 在这次退出之后已经把该核的定时器自动屏蔽了，必须等客户机
+				// EOI 掉 27（那时它已写好下一次到期时间）再解除，见 interruptEndedForCPU:irq:。
+				_vtimerMasked[cpuIndex] = YES;
+				_vtimerPendingCount++;
+				if (_vtimerLogCount < 3) {
+					_vtimerLogCount++;
+					uint64_t pc = 0;
+					[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
+					[VLStartupLog log:@"虚拟定时器到期：核 %lu PC=0x%llx，挂 INTID %u（累计 %lu 次）",
+					 (unsigned long)cpuIndex, (unsigned long long)pc, VLPPIVirtualTimer,
+					 (unsigned long)_vtimerPendingCount];
+				}
 				[_interruptController setIRQPending:VLPPIVirtualTimer];
 				continue;
 			}
@@ -944,9 +1011,17 @@ static NSString *VLCPURestName(uint32_t reason) {
 		BOOL irqMasked = (cpsr & (1ULL << 7)) != 0;
 		if (!irqMasked &&
 			![_interruptController hasPendingInterruptForCPU:(uint32_t)cpuIndex]) {
+			// 每次重试 ≈ 1 ms，攒到 0.5 秒记一行：卡死时能直接看出哪个核在空等。
+			_wfiWaits[cpuIndex]++;
+			if (_wfiWaits[cpuIndex] == 500 && _wfiStallLogCount < 8) {
+				_wfiStallLogCount++;
+				[VLStartupLog log:@"核 %lu 在 WFI 上已等 0.5 秒：PC=0x%llx，没有可投递的中断",
+				 (unsigned long)cpuIndex, (unsigned long long)pc];
+			}
 			usleep(1000);
 			return YES;
 		}
+		_wfiWaits[cpuIndex] = 0;
 		[_hypervisor setRegister:VLHypervisorRegisterPC value:pc + 4 forVCPU:vcpu];
 		return YES;
 	}
