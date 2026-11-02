@@ -104,6 +104,9 @@ static void VLStartupLogHandleSignal(int signalNumber) {
 
 	[self log:@"==== 启动开始 ===="];
 	[self log:@"bundle=%@ path=%@", NSBundle.mainBundle.bundleIdentifier, NSBundle.mainBundle.bundlePath];
+	// 每次打开日志第一行就能确认装的是哪一版：排查时最怕对着旧包猜。
+	NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+	[self log:@"版本=%@（build %@）", info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]];
 	[self log:@"系统=%@ 机型=%@", UIDevice.currentDevice.systemVersion, UIDevice.currentDevice.model];
 }
 

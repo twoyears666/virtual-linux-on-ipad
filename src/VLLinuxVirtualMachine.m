@@ -158,6 +158,15 @@ static NSString *VLCPURestName(uint32_t reason) {
 	/// 运行采样：每 30 秒记一行 CPU / 内存 / 退出次数，用来判断是不是这台虚拟机
 	/// 把整机的 CPU 或内存吃满，连累系统服务（例如媒体服务）被饿死。
 	dispatch_source_t _usageTimer;
+
+	/// 退出原因的累计计数（采样行里拆开打印）。卡死时如果只有「取消」在涨，
+	/// 说明是 hv_vcpu_run 被反复踢出，而不是客户机真的在陷 MMIO。
+	uint64_t _canceledExitCount;
+	uint64_t _vtimerExitCount;
+	uint64_t _exceptionExitCount;
+	uint64_t _wfiTrapCount;
+	uint64_t _sysregTrapCount;
+	uint64_t _mmioTrapCount;
 	uint64_t _totalExits;
 	uint64_t _sampledExits;
 }
@@ -243,6 +252,12 @@ static NSString *VLCPURestName(uint32_t reason) {
 	_vtimerUnmaskFailureCount = 0;
 	memset(_wfiWaits, 0, sizeof(_wfiWaits));
 	_wfiStallLogCount = 0;
+	_canceledExitCount = 0;
+	_vtimerExitCount = 0;
+	_exceptionExitCount = 0;
+	_wfiTrapCount = 0;
+	_sysregTrapCount = 0;
+	_mmioTrapCount = 0;
 	[_startCondition unlock];
 	[self parseDisplayResolution];
 	[self reportState:VLVirtualMachineStateStarting message:@"创建虚拟硬件…"];
@@ -286,6 +301,13 @@ static NSString *VLCPURestName(uint32_t reason) {
 	uint64_t exits = __atomic_load_n(&_totalExits, __ATOMIC_RELAXED);
 	uint64_t delta = exits - _sampledExits;
 	_sampledExits = exits;
+	[VLStartupLog log:@"退出构成：取消 %llu、定时器 %llu、异常 %llu（MMIO %llu、WFI %llu、系统寄存器 %llu）",
+	 (unsigned long long)__atomic_load_n(&_canceledExitCount, __ATOMIC_RELAXED),
+	 (unsigned long long)__atomic_load_n(&_vtimerExitCount, __ATOMIC_RELAXED),
+	 (unsigned long long)__atomic_load_n(&_exceptionExitCount, __ATOMIC_RELAXED),
+	 (unsigned long long)__atomic_load_n(&_mmioTrapCount, __ATOMIC_RELAXED),
+	 (unsigned long long)__atomic_load_n(&_wfiTrapCount, __ATOMIC_RELAXED),
+	 (unsigned long long)__atomic_load_n(&_sysregTrapCount, __ATOMIC_RELAXED)];
 	[VLStartupLog log:@"运行采样：CPU %.0f%%（%lu 核），占用 %lu MB，可用 %lu MB，退出 %llu 次/10 秒；各核 %@",
 	 (double)cpuPercent, (unsigned long)_cpuCount,
 	 (unsigned long)[VLHostCapabilities residentMemoryMB],
@@ -935,6 +957,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 				 (unsigned long long)cpsr];
 			}
 			if (reason == VLHypervisorExitReasonCanceled) {
+				__atomic_add_fetch(&_canceledExitCount, 1, __ATOMIC_RELAXED);
 				continue;
 			}
 			// 输入和网络只在 0 号核上服务，多核时不会重复搬运同一批帧。
@@ -952,6 +975,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 				// EOI 掉 27（那时它已写好下一次到期时间）再解除，见 interruptEndedForCPU:irq:。
 				_vtimerMasked[cpuIndex] = YES;
 				_vtimerPendingCount++;
+				__atomic_add_fetch(&_vtimerExitCount, 1, __ATOMIC_RELAXED);
 				if (_vtimerLogCount < 3) {
 					_vtimerLogCount++;
 					uint64_t pc = 0;
@@ -964,6 +988,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 				continue;
 			}
 			if (reason == VLHypervisorExitReasonException) {
+				__atomic_add_fetch(&_exceptionExitCount, 1, __ATOMIC_RELAXED);
 				if (![self handleExceptionForCPU:cpuIndex vcpu:vcpu exitInfo:exitInfo]) {
 					return;
 				}
@@ -986,6 +1011,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 	uint32_t exceptionClass = (uint32_t)((syndrome >> 26) & 0x3F);
 
 	if (exceptionClass == 0x24 || exceptionClass == 0x25) {
+		__atomic_add_fetch(&_mmioTrapCount, 1, __ATOMIC_RELAXED);
 		return [self handleDataAbortSyndrome:syndrome
 							 virtualAddress:exitInfo->info.exception.virtualAddress
 							physicalAddress:exitInfo->info.exception.physicalAddress
@@ -993,6 +1019,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 									   vcpu:vcpu];
 	}
 	if (exceptionClass == 0x01) {
+		__atomic_add_fetch(&_wfiTrapCount, 1, __ATOMIC_RELAXED);
 		// WFI/WFE 陷入：客户机在等中断。只有本核真的有能投递的挂起中断时，这条指令
 		// 才算执行完（PC+4）；否则原地睡一会儿再重试同一条指令。
 		// 之前无条件 PC+4 等于把 WFI 当 nop，客户机永远不会真睡，定时器中断也就
@@ -1029,6 +1056,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 		return [self handleHypervisorCallForCPU:cpuIndex vcpu:vcpu];
 	}
 	if (exceptionClass == 0x18) {
+		__atomic_add_fetch(&_sysregTrapCount, 1, __ATOMIC_RELAXED);
 		// 系统寄存器陷入：Apple 的 Hypervisor 没实现这个寄存器（例如 ID_AA64ISAR2_EL1），
 		// 内核一读就直接退出。按「该特性不存在」返回 0，然后跳过这条指令继续跑。
 		uint64_t pc = 0;
