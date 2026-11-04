@@ -686,6 +686,12 @@ static void VLWriteLE64(uint8_t *bytes, uint64_t value) {
 		}
 		_lastPublishTime = now;
 	}
+	// 界面还在消化上一帧时直接跳过，脏标记保留到下一次 FLUSH。
+	// 整帧拷贝 3 MB，比少显示一帧贵得多。
+	BOOL (^accept)(void) = self.frameAcceptHandler;
+	if (accept != NULL && !accept()) {
+		return;
+	}
 	_framebufferDirty = NO;
 
 	size_t byteCount = (size_t)_framebufferWidth * _framebufferHeight * 4;

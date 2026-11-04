@@ -986,6 +986,14 @@ static NSString *VLCPURestName(uint32_t reason) {
 		}
 		[strongSelf deliverFrameWidth:width height:height data:frame];
 	};
+	// 界面还在画上一帧时不重复打包整幅画面（3 MB 一次），等下一帧一起送。
+	_gpu.frameAcceptHandler = ^BOOL {
+		typeof(self) strongSelf = weakSelf;
+		if (strongSelf == nil) {
+			return NO;
+		}
+		return !__atomic_load_n(&strongSelf->_framePending, __ATOMIC_RELAXED);
+	};
 	[_deviceBus addDevice:_gpu];
 
 	// 显示设置里的帧率上限直接透给 GPU，超出的 FLUSH 先攒着，不白拷一遍。
@@ -1717,16 +1725,15 @@ static uint64_t VLGuestCounterValue(void) {
 
 /// 画面回调在 vCPU 线程上触发：做一次单帧背压，避免界面被刷爆。
 - (void)deliverFrameWidth:(uint32_t)width height:(uint32_t)height data:(NSData *)data {
-	if (_framePending) {
+	if (__atomic_exchange_n(&_framePending, YES, __ATOMIC_RELAXED)) {
 		return;
 	}
-	_framePending = YES;
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		typeof(self) strongSelf = weakSelf;
 		if (strongSelf != nil) {
 			[strongSelf.delegate virtualMachine:strongSelf didUpdateFrameWidth:width height:height data:data];
-			strongSelf->_framePending = NO;
+			__atomic_store_n(&strongSelf->_framePending, NO, __ATOMIC_RELAXED);
 		}
 	});
 }

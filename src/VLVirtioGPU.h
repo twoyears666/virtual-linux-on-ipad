@@ -29,6 +29,11 @@
 /// 一帧画面：BGRA 8888，行距紧密（width * 4）。
 @property (nonatomic, copy) void (^frameHandler)(uint32_t width, uint32_t height, NSData *frame);
 
+/// 交付前先问一句「界面现在接得住吗」。返回 NO 时整帧跳过、脏标记保留，
+/// 下次 FLUSH 再送——宿主还在画上一帧时，那 3 MB 的整帧拷贝纯属白做。
+/// 没设置就视为一直接得住。
+@property (nonatomic, copy) BOOL (^frameAcceptHandler)(void);
+
 /// 每秒最多交给界面多少帧；0 表示不限。界面刷新再快也画不出来，限住能省下每帧的拷贝。
 @property (nonatomic, assign) uint32_t maximumFramesPerSecond;
 
