@@ -149,6 +149,18 @@ static NSString *VLCPURestName(uint32_t reason) {
 	NSUInteger _wfiWaits[VLMaximumCPUs];
 	NSUInteger _wfiStallLogCount;
 
+	/// 每核 WFI/WFE 陷入的累计次数，以及最后一次的 PC / CPSR。
+	/// 多核卡死时这两个值最直接：能看出哪个核停在哪个 PC、当时是否关中断在自旋。
+	uint64_t _wfiTrapTally[VLMaximumCPUs];
+	uint64_t _wfiTrapPC[VLMaximumCPUs];
+	uint64_t _wfiTrapCPSR[VLMaximumCPUs];
+	NSUInteger _wfiMaskedLogCount[VLMaximumCPUs];
+
+	/// 每核累计退出次数与上次采样值：某个核一整轮 10 秒 0 次退出，
+	/// 说明它要么卡在客户机里、要么卡在 VMM 代码上，和「在 WFI 里空转」完全不同。
+	uint64_t _cpuExitTally[VLMaximumCPUs];
+	uint64_t _cpuExitSampled[VLMaximumCPUs];
+
 	BOOL _stopRequested;
 	BOOL _framePending;
 	uint64_t _guestMemorySize;
@@ -252,6 +264,12 @@ static NSString *VLCPURestName(uint32_t reason) {
 	_vtimerUnmaskFailureCount = 0;
 	memset(_wfiWaits, 0, sizeof(_wfiWaits));
 	_wfiStallLogCount = 0;
+	memset(_wfiTrapTally, 0, sizeof(_wfiTrapTally));
+	memset(_wfiTrapPC, 0, sizeof(_wfiTrapPC));
+	memset(_wfiTrapCPSR, 0, sizeof(_wfiTrapCPSR));
+	memset(_wfiMaskedLogCount, 0, sizeof(_wfiMaskedLogCount));
+	memset(_cpuExitTally, 0, sizeof(_cpuExitTally));
+	memset(_cpuExitSampled, 0, sizeof(_cpuExitSampled));
 	_canceledExitCount = 0;
 	_vtimerExitCount = 0;
 	_exceptionExitCount = 0;
@@ -331,6 +349,19 @@ static NSString *VLCPURestName(uint32_t reason) {
 			[text appendFormat:@"%lu=%@@0x%llx", (unsigned long)index, VLCPURestName(reason),
 			 (unsigned long long)_slots[index].lastExitPC];
 		}
+		// WFI/WFE 是「每次循环都被重置」的状态位，采样常常正好撞上 0，看不出东西；
+		// 这里再补上当核累计的 WFI 次数、最后一条 WFI 的 PC 和当时的 DAIF.I。
+		uint64_t tally = __atomic_load_n(&_wfiTrapTally[index], __ATOMIC_RELAXED);
+		if (tally > 0) {
+			[text appendFormat:@"[WFI×%llu@0x%llx I=%d]", (unsigned long long)tally,
+			 (unsigned long long)_wfiTrapPC[index],
+			 (int)((_wfiTrapCPSR[index] >> 7) & 1)];
+		}
+		// 这一轮 10 秒里这个核退出了多少次。0 次 = 它在客户机里长跑或在 VMM 里被卡住。
+		uint64_t exits = __atomic_load_n(&_cpuExitTally[index], __ATOMIC_RELAXED);
+		uint64_t exitDelta = exits - _cpuExitSampled[index];
+		_cpuExitSampled[index] = exits;
+		[text appendFormat:@"[退出+%llu]", (unsigned long long)exitDelta];
 	}
 	return text;
 }
@@ -919,6 +950,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 		// 每次退出都可能产生临时对象（画面数据），按迭代回收，避免长期运行内存一直涨。
 		@autoreleasepool {
 			__atomic_add_fetch(&_totalExits, 1, __ATOMIC_RELAXED);
+			__atomic_add_fetch(&_cpuExitTally[cpuIndex], 1, __ATOMIC_RELAXED);
 			// 进客户机前先标成「运行中」，退出后只有 WFI / 系统寄存器会改写它。
 			_slots[cpuIndex].lastExitReason = 0;
 			// 设备侧只记了中断线电平，真正下发给 HVF 必须在本线程、进客户机之前做。
@@ -1036,6 +1068,16 @@ static NSString *VLCPURestName(uint32_t reason) {
 		uint64_t cpsr = 0;
 		[_hypervisor getRegister:VLHypervisorRegisterCPSR value:&cpsr forVCPU:vcpu];
 		BOOL irqMasked = (cpsr & (1ULL << 7)) != 0;
+		// 记下这台核最后一次 WFI/WFE 的位置。采样行会带上这两个值，卡死时不用猜。
+		__atomic_add_fetch(&_wfiTrapTally[cpuIndex], 1, __ATOMIC_RELAXED);
+		_wfiTrapPC[cpuIndex] = pc;
+		_wfiTrapCPSR[cpuIndex] = cpsr;
+		if (irqMasked && _wfiMaskedLogCount[cpuIndex] < 2) {
+			_wfiMaskedLogCount[cpuIndex]++;
+			uint32_t pending = [_interruptController highestPendingInterruptForCPU:(uint32_t)cpuIndex];
+			[VLStartupLog log:@"核 %lu 关中断执行 WFI/WFE：PC=0x%llx，挂起中断 %u",
+			 (unsigned long)cpuIndex, (unsigned long long)pc, pending];
+		}
 		if (!irqMasked &&
 			![_interruptController hasPendingInterruptForCPU:(uint32_t)cpuIndex]) {
 			// 每次重试 ≈ 1 ms，攒到 0.5 秒记一行：卡死时能直接看出哪个核在空等。
