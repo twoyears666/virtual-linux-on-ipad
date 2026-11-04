@@ -15,6 +15,9 @@ static const uint32_t VLFDTTokenProperty = 3;
 static const uint32_t VLFDTTokenEnd = 9;
 
 static const uint32_t VLFDTPHandleInterruptController = 1;
+/// PL011 的固定输入时钟。pl011 驱动 probe 时第一件事就是 devm_clk_get()，
+/// DT 里没有 clocks 属性会直接 -ENOENT 返回，ttyAMA0 永远不注册。
+static const uint32_t VLFDTPHandleUARTClock = 2;
 
 /// 0x0A–0x0E 已被 GPU / blk / input / net / iso 占用，控制台接在 0x0F。
 uint64_t VLDeviceTreeConsoleBase(void) {
@@ -183,6 +186,16 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleInterruptController) ]];
 	[self endNode];
 
+	// PL011 的输入时钟。pl011 驱动 probe 里 devm_clk_get() 失败就返回 -ENOENT，
+	// 没有这个节点，ttyAMA0 永远不会注册（earlycon 照样能打印，所以很容易误判
+	// 成「串口正常」——实际只有 bootconsole，用户态打不开 /dev/console）。
+	[self beginNode:@"clock-uart"];
+	[self propertyNamed:@"compatible" string:@"fixed-clock"];
+	[self propertyNamed:@"#clock-cells" cells:@[ @0 ]];
+	[self propertyNamed:@"clock-frequency" cells:@[ @24000000 ]];
+	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleUARTClock) ]];
+	[self endNode];
+
 	// 串口：SPI 1。compatible 必须带上 "arm,primecell"：内核才会按 amba 总线
 	// 建这个设备并让 pl011 驱动匹配；只写 "arm,pl011" 会被当成普通平台设备，
 	// 永远等不到 probe，ttyAMA0 不注册，用户态连控制台都打不开。
@@ -193,6 +206,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					   @((uint32_t)(uartBase >> 32)), @((uint32_t)(uartBase & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @1, @4 ]];
+	[self propertyNamed:@"clocks" cells:@[ @(VLFDTPHandleUARTClock) ]];
 	[self propertyNamed:@"clock-frequency" cells:@[ @24000000 ]];
 	[self endNode];
 

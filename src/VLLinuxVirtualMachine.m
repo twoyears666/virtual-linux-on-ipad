@@ -548,23 +548,24 @@ static NSString *VLCPURestName(uint32_t reason) {
 	BOOL wasMasked = _vtimerMasked[cpuIndex];
 	BOOL wasActive = [_interruptController isInterruptActive:VLPPIVirtualTimer
 													  forCPU:(uint32_t)cpuIndex];
-	// 没东西卡住就不动：正常空闲的核每 200 ms 走到这里一次，不能真去解除。
-	if (!wasMasked && !wasActive) {
-		return;
-	}
+	// 无条件重新下发一次「解除掩码」：HVF 的掩码状态没有 getter，我们记的
+	// _vtimerMasked 只是软件侧的猜测。EOI 那条路径如果 setVTimerMask 失败、
+	// 或者掩码被别的退出路径重新置上，软件标志就会与实际状态失真——
+	// 0.2.0 日志里 CPU1 每 10 秒只有 1 次定时器退出、而采样却显示「掩码=否」，
+	// 就是这种情况（真机上它已经停摆，标志却看着正常）。
+	// 代价：正常空闲的核每 200 ms 也可能被强制解除一次，最多多几次空 tick。
 	_vtimerMasked[cpuIndex] = NO;
+	BOOL shouldLog = wasMasked || wasActive;
+	int32_t result = [_hypervisor setVTimerMask:NO forVCPU:vcpu];
+	if (result != 0 && _vtimerUnmaskFailureCount < 3) {
+		_vtimerUnmaskFailureCount++;
+		[VLStartupLog log:@"解除虚拟定时器掩码失败（0x%x）：核 %lu", (unsigned)result,
+		 (unsigned long)cpuIndex];
+	}
 	if (wasActive) {
 		[_interruptController releaseInterruptIfStuck:VLPPIVirtualTimer forCPU:(uint32_t)cpuIndex];
 	}
-	if (wasMasked) {
-		int32_t result = [_hypervisor setVTimerMask:NO forVCPU:vcpu];
-		if (result != 0 && _vtimerUnmaskFailureCount < 3) {
-			_vtimerUnmaskFailureCount++;
-			[VLStartupLog log:@"解除虚拟定时器掩码失败（0x%x）：核 %lu", (unsigned)result,
-			 (unsigned long)cpuIndex];
-		}
-	}
-	if (_vtimerHealCount[cpuIndex] < 4) {
+	if (shouldLog && _vtimerHealCount[cpuIndex] < 4) {
 		_vtimerHealCount[cpuIndex]++;
 		[VLStartupLog log:@"虚拟定时器掩码自愈：核 %lu 空闲 200 ms 没有定时器退出（掩码=%@ active=%@）",
 		 (unsigned long)cpuIndex, wasMasked ? @"是" : @"否", wasActive ? @"是" : @"否"];
@@ -856,39 +857,29 @@ static NSString *VLCPURestName(uint32_t reason) {
 		bootVolume.commandLine.length > 0
 			? bootVolume.commandLine
 			: @"console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7 panic=1"];
-	// 客户机 initramfs 里通常没有 /dev/console，内核在 exec /init 之前打不开它，
-	// /init 之后所有用户态输出都会被丢掉（0.1.4 日志里那句
-	// "unable to open an initial console" 就是它，此后一片空白）。
-	// devtmpfs.mount=1 让内核对 rootfs 自动挂上 devtmpfs，/dev/console 随之出现。
-	// 系统盘启动时命令行是安装器写下的，两种来源都要补。
-	if ([bootArguments rangeOfString:@"devtmpfs.mount"].location == NSNotFound) {
-		[bootArguments appendString:@" devtmpfs.mount=1"];
-	}
-	// 控制台从 PL011 换成 hvc0：virtio-console 一次提交搬走整段输出，
-	// 不用再每字符陷进串口 MMIO。earlycon 保留 PL011，内核最早那几行仍然看得到。
-	// 安装器写下的命令行可能带 console=ttyAMA0（含波特率），统一替换掉。
-	NSRegularExpression *legacyConsole =
-		[NSRegularExpression regularExpressionWithPattern:@"console=ttyAMA0[^\\s]*"
-												 options:0
-												   error:NULL];
-	if (legacyConsole != nil) {
-		[legacyConsole replaceMatchesInString:bootArguments
-									   options:0
-										 range:NSMakeRange(0, bootArguments.length)
-								   withTemplate:@"console=hvc0"];
-	}
+
+	// 两个控制台同时注册：ttyAMA0 由内核内建驱动注册，最先可用，保证
+	// /dev/console 一定能打开；hvc0 依赖客户机里的 virtio_console 驱动，
+	// 存在时作为主控制台（cmdline 里靠后的 console 优先）。只写 hvc0 的话，
+	// 驱动缺失时 /init 之后整台机完全静默（0.2.0 日志就是这样）。
+	// 不要替换掉安装器写下的 console=ttyAMA0，它是兜底。
 	if ([bootArguments rangeOfString:@"console=hvc0"].location == NSNotFound) {
 		[bootArguments appendString:@" console=hvc0"];
 	}
-	// 启动日志量：调试期的 loglevel=7 会把启动期几万行全部打到控制台，
-	// 每一行都是一次 virtio 提交。降到 warning 级并加 quiet，只留关键信息；
-	// panic / rcu stall / watchdog 都是 critical 及以上，照样会打印。
-	[bootArguments replaceOccurrencesOfString:@"loglevel=7"
-								   withString:@"loglevel=4"
+	// 调试期保留完整日志：console 注册、initramfs、rootfs 探测都要看得到。
+	// 启动链稳定后再改回 loglevel=4 + quiet。
+	[bootArguments replaceOccurrencesOfString:@"loglevel=4"
+								   withString:@"loglevel=7"
 									  options:0
 										range:NSMakeRange(0, bootArguments.length)];
-	if ([bootArguments rangeOfString:@"quiet"].location == NSNotFound) {
-		[bootArguments appendString:@" quiet"];
+	if ([bootArguments rangeOfString:@"loglevel="].location == NSNotFound) {
+		[bootArguments appendString:@" loglevel=7"];
+	}
+	if ([bootArguments rangeOfString:@"quiet"].location != NSNotFound) {
+		[bootArguments replaceOccurrencesOfString:@"quiet"
+									   withString:@""
+										  options:0
+											range:NSMakeRange(0, bootArguments.length)];
 	}
 	if (hasPreseed && bootVolume.commandLine.length == 0) {
 		[bootArguments appendString:
