@@ -880,6 +880,16 @@ static NSString *VLCPURestName(uint32_t reason) {
 	if ([bootArguments rangeOfString:@"console=hvc0"].location == NSNotFound) {
 		[bootArguments appendString:@" console=hvc0"];
 	}
+	// 启动日志量：调试期的 loglevel=7 会把启动期几万行全部打到控制台，
+	// 每一行都是一次 virtio 提交。降到 warning 级并加 quiet，只留关键信息；
+	// panic / rcu stall / watchdog 都是 critical 及以上，照样会打印。
+	[bootArguments replaceOccurrencesOfString:@"loglevel=7"
+								   withString:@"loglevel=4"
+									  options:0
+										range:NSMakeRange(0, bootArguments.length)];
+	if ([bootArguments rangeOfString:@"quiet"].location == NSNotFound) {
+		[bootArguments appendString:@" quiet"];
+	}
 	if (hasPreseed && bootVolume.commandLine.length == 0) {
 		[bootArguments appendString:
 			@" ip=dhcp auto=true priority=critical preseed/url=http://10.0.2.2/preseed.cfg"];
