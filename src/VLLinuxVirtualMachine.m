@@ -850,6 +850,14 @@ static NSString *VLCPURestName(uint32_t reason) {
 		bootVolume.commandLine.length > 0
 			? bootVolume.commandLine
 			: @"console=ttyAMA0,115200 earlycon=pl011,0x09000000 loglevel=7 panic=1"];
+	// 客户机 initramfs 里通常没有 /dev/console，内核在 exec /init 之前打不开它，
+	// /init 之后所有用户态输出都会被丢掉（0.1.4 日志里那句
+	// "unable to open an initial console" 就是它，此后一片空白）。
+	// devtmpfs.mount=1 让内核对 rootfs 自动挂上 devtmpfs，/dev/console 随之出现。
+	// 系统盘启动时命令行是安装器写下的，两种来源都要补。
+	if ([bootArguments rangeOfString:@"devtmpfs.mount"].location == NSNotFound) {
+		[bootArguments appendString:@" devtmpfs.mount=1"];
+	}
 	if (hasPreseed && bootVolume.commandLine.length == 0) {
 		[bootArguments appendString:
 			@" ip=dhcp auto=true priority=critical preseed/url=http://10.0.2.2/preseed.cfg"];

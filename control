@@ -1,6 +1,6 @@
 Package: com.twoyears666.virtuallinux
 Name: Virtual Linux
-Version: 0.1.5
+Version: 0.1.6
 Architecture: iphoneos-arm64
 Description: Run Linux virtual machines on jailbroken iPadOS and iOS.
  Uses the hardware virtualization stack that still exists in the XNU kernel
