@@ -23,6 +23,7 @@
 #import "VLStartupLog.h"
 #import "VLVMConfiguration.h"
 #import "VLVirtioBlock.h"
+#import "VLVirtioConsole.h"
 #import "VLVirtioGPU.h"
 #import "VLVirtioInput.h"
 #import "VLVirtioNet.h"
@@ -49,6 +50,8 @@ static const uint32_t VLBlockInterrupt = 35;
 static const uint32_t VLInputInterrupt = 36;
 static const uint32_t VLNetInterrupt = 37;
 static const uint32_t VLISOInterrupt = 38;
+/// virtio-console 在设备树里写的是 SPI 7，转成 INTID 就是 39。
+static const uint32_t VLConsoleInterrupt = 39;
 static const uint32_t VLPPIVirtualTimer = 27;
 
 /// HVC 调用（PSCI）里的功能号
@@ -137,6 +140,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 	VLVirtioBlock *_block;
 	VLVirtioInput *_input;
 	VLVirtioNet *_net;
+	VLVirtioConsole *_console;
 	VLNetStack *_network;
 	VLVirtioBlock *_iso;
 
@@ -858,6 +862,22 @@ static NSString *VLCPURestName(uint32_t reason) {
 	if ([bootArguments rangeOfString:@"devtmpfs.mount"].location == NSNotFound) {
 		[bootArguments appendString:@" devtmpfs.mount=1"];
 	}
+	// 控制台从 PL011 换成 hvc0：virtio-console 一次提交搬走整段输出，
+	// 不用再每字符陷进串口 MMIO。earlycon 保留 PL011，内核最早那几行仍然看得到。
+	// 安装器写下的命令行可能带 console=ttyAMA0（含波特率），统一替换掉。
+	NSRegularExpression *legacyConsole =
+		[NSRegularExpression regularExpressionWithPattern:@"console=ttyAMA0[^\\s]*"
+												 options:0
+												   error:NULL];
+	if (legacyConsole != nil) {
+		[legacyConsole replaceMatchesInString:bootArguments
+									   options:0
+										 range:NSMakeRange(0, bootArguments.length)
+								   withTemplate:@"console=hvc0"];
+	}
+	if ([bootArguments rangeOfString:@"console=hvc0"].location == NSNotFound) {
+		[bootArguments appendString:@" console=hvc0"];
+	}
 	if (hasPreseed && bootVolume.commandLine.length == 0) {
 		[bootArguments appendString:
 			@" ip=dhcp auto=true priority=critical preseed/url=http://10.0.2.2/preseed.cfg"];
@@ -1033,6 +1053,14 @@ static NSString *VLCPURestName(uint32_t reason) {
 							 interruptController:_interruptController
 										   network:_network];
 	[_deviceBus addDevice:_net];
+
+	// 控制台：hvc0 绑在 virtio-console 上，一次提交取走整段输出，
+	// 不再按字符陷进 PL011 的 MMIO。PL011 留着给 earlycon 用。
+	_console = [[VLVirtioConsole alloc] initWithBaseAddress:VLDeviceTreeConsoleBase()
+											   guestMemory:_guestMemory
+										   interruptNumber:VLConsoleInterrupt
+									 interruptController:_interruptController];
+	[_deviceBus addDevice:_console];
 
 	// 把这一轮真实的 MMIO 布局记下来：以后再出现「未实现的 MMIO 地址」，
 	// 一眼就能对出是哪个区间少挂了设备。
@@ -1646,6 +1674,7 @@ static uint64_t VLGuestCounterValue(void) {
 	_iso = nil;
 	_input = nil;
 	_net = nil;
+	_console = nil;
 	[_network stop];
 	_network = nil;
 }

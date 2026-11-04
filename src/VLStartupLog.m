@@ -51,6 +51,26 @@ static void VLStartupLogAppend(NSString *fileName, NSString *line) {
 	}
 }
 
+static void VLStartupLogAppendRaw(NSString *fileName, NSData *payload) {
+	if (payload.length == 0) {
+		return;
+	}
+	NSString *path = [VLStartupLogDirectory() stringByAppendingPathComponent:fileName];
+	NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+	if (handle == nil) {
+		[payload writeToFile:path atomically:YES];
+		return;
+	}
+	@try {
+		[handle seekToEndOfFile];
+		[handle writeData:payload];
+	} @catch (NSException *exception) {
+		// 忽略写入失败
+	} @finally {
+		[handle closeFile];
+	}
+}
+
 static void VLStartupLogHandleException(NSException *exception) {
 	NSString *report = [NSString stringWithFormat:
 		@"未捕获异常\nname=%@\nreason=%@\ncallStackSymbols:\n%@",
@@ -119,6 +139,10 @@ static void VLStartupLogHandleSignal(int signalNumber) {
 	VLStartupLogAppend(@"startup.log", line);
 	// 同一行也进统一日志，导出时能在一份文件里看到完整时间线。
 	[VLLog writeLine:line];
+}
+
++ (void)appendGuestConsoleData:(NSData *)data {
+	VLStartupLogAppendRaw(@"startup.log", data);
 }
 
 @end

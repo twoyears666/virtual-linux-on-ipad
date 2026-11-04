@@ -16,6 +16,12 @@ static const uint32_t VLFDTTokenEnd = 9;
 
 static const uint32_t VLFDTPHandleInterruptController = 1;
 
+/// 0x0A–0x0E 已被 GPU / blk / input / net / iso 占用，控制台接在 0x0F。
+uint64_t VLDeviceTreeConsoleBase(void) {
+	return 0x0F000000;
+}
+
+
 static const NSUInteger VLFDTMaximumCPUs = 8;
 
 static void VLAppendBE32(NSMutableData *data, uint32_t value) {
@@ -225,6 +231,19 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					   @((uint32_t)(netBase >> 32)), @((uint32_t)(netBase & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @5, @4 ]];
+	[self endNode];
+
+	// virtio-console（hvc0）：SPI 7。控制台换成它之后，客户机输出是一次提交
+	// 取走整段，不用再按字符陷进 PL011 的 MMIO。
+	[self beginNode:[NSString stringWithFormat:@"virtio_mmio@%llx",
+					 (unsigned long long)VLDeviceTreeConsoleBase()]];
+	[self propertyNamed:@"compatible" string:@"virtio,mmio"];
+	[self propertyNamed:@"reg"
+				   cells:@[
+					   @((uint32_t)(VLDeviceTreeConsoleBase() >> 32)),
+					   @((uint32_t)(VLDeviceTreeConsoleBase() & 0xFFFFFFFF)), @0, @0x1000,
+				   ]];
+	[self propertyNamed:@"interrupts" cells:@[ @0, @7, @4 ]];
 	[self endNode];
 
 	// 安装镜像（只读光驱）：SPI 6（没选 ISO 就不声明）
