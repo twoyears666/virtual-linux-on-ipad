@@ -173,6 +173,13 @@ static NSString *VLCPURestName(uint32_t reason) {
 	NSUInteger _vtimerLogCount;
 	NSUInteger _vtimerUnmaskFailureCount;
 
+	/// 每核累计的 VTIMER 退出次数与上次采样值。0.1.4 的日志只能靠「总退出速率
+	/// ≈ 5×250 Hz」推断出 6 个核里只有 5 个在 tick；拆到每核就不必再推了。
+	uint64_t _vtimerTally[VLMaximumCPUs];
+	uint64_t _vtimerSampled[VLMaximumCPUs];
+	/// 掩码自愈的次数（前 4 次记日志）。正常路径走 EOI 解除掩码，这里是兜底。
+	NSUInteger _vtimerHealCount[VLMaximumCPUs];
+
 	/// WFI 上「连着等了多久」的计数（一次 ≈ 1 ms），到 0.5 秒记一行，
 	/// 卡死时直接看出核停在哪个 PC、是不是在等一个永远不来的中断。
 	NSUInteger _wfiWaits[VLMaximumCPUs];
@@ -291,6 +298,9 @@ static NSString *VLCPURestName(uint32_t reason) {
 	_vtimerPendingCount = 0;
 	_vtimerLogCount = 0;
 	_vtimerUnmaskFailureCount = 0;
+	memset(_vtimerTally, 0, sizeof(_vtimerTally));
+	memset(_vtimerSampled, 0, sizeof(_vtimerSampled));
+	memset(_vtimerHealCount, 0, sizeof(_vtimerHealCount));
 	memset(_wfiWaits, 0, sizeof(_wfiWaits));
 	_wfiStallLogCount = 0;
 	memset(_wfiTrapTally, 0, sizeof(_wfiTrapTally));
@@ -391,6 +401,15 @@ static NSString *VLCPURestName(uint32_t reason) {
 		uint64_t exitDelta = exits - _cpuExitSampled[index];
 		_cpuExitSampled[index] = exits;
 		[text appendFormat:@"[退出+%llu]", (unsigned long long)exitDelta];
+		// 这个核这一轮 10 秒里被打了几次虚拟定时器。250 Hz 下正常应该是 2500 左右；
+		// 明显偏低或为 0 就说明它的 tick 停摆了，而不是「核在忙」。
+		uint64_t timers = __atomic_load_n(&_vtimerTally[index], __ATOMIC_RELAXED);
+		uint64_t timerDelta = timers - _vtimerSampled[index];
+		_vtimerSampled[index] = timers;
+		[text appendFormat:@"[定时+%llu 掩码=%@ 激活=%@]",
+		 (unsigned long long)timerDelta,
+		 _vtimerMasked[index] ? @"是" : @"否",
+		 [_interruptController isInterruptActive:VLPPIVirtualTimer forCPU:(uint32_t)index] ? @"是" : @"否"];
 		// 中断线：设备侧看到的电平 / 已经下发给 HVF 的电平。两者不一致说明下发这一步没走到；
 		// 两者都是高却仍然等不到中断，问题就在 HVF 的投递上。
 		[text appendFormat:@"[线=%@ 下发=%@ 挂起=%u]",
@@ -509,6 +528,40 @@ static NSString *VLCPURestName(uint32_t reason) {
 	if (result != 0 && _vtimerUnmaskFailureCount < 3) {
 		_vtimerUnmaskFailureCount++;
 		[VLStartupLog log:@"解除虚拟定时器掩码失败（0x%x）：核 %u", (unsigned)result, cpuIndex];
+	}
+}
+
+/// 虚拟定时器掩码自愈。只在这个核「明明空闲、定时器却再也不响」时才调用。
+/// 有两条独立的路径都会让 tick 永久停摆：EOI 没走到、HVF 的掩码一直挂着；
+/// 或者客户机确认了 27 却没写 EOIR，GIC 的 active 位把后续投递全挡住了。
+/// 两处都清掉再刷新中断线，让挂起的 27 重新变成可投递。
+- (void)recoverStuckVirtualTimerForCPU:(NSUInteger)cpuIndex vcpu:(uint64_t)vcpu {
+	if (cpuIndex >= VLMaximumCPUs) {
+		return;
+	}
+	BOOL wasMasked = _vtimerMasked[cpuIndex];
+	BOOL wasActive = [_interruptController isInterruptActive:VLPPIVirtualTimer
+													  forCPU:(uint32_t)cpuIndex];
+	// 没东西卡住就不动：正常空闲的核每 200 ms 走到这里一次，不能真去解除。
+	if (!wasMasked && !wasActive) {
+		return;
+	}
+	_vtimerMasked[cpuIndex] = NO;
+	if (wasActive) {
+		[_interruptController releaseInterruptIfStuck:VLPPIVirtualTimer forCPU:(uint32_t)cpuIndex];
+	}
+	if (wasMasked) {
+		int32_t result = [_hypervisor setVTimerMask:NO forVCPU:vcpu];
+		if (result != 0 && _vtimerUnmaskFailureCount < 3) {
+			_vtimerUnmaskFailureCount++;
+			[VLStartupLog log:@"解除虚拟定时器掩码失败（0x%x）：核 %lu", (unsigned)result,
+			 (unsigned long)cpuIndex];
+		}
+	}
+	if (_vtimerHealCount[cpuIndex] < 4) {
+		_vtimerHealCount[cpuIndex]++;
+		[VLStartupLog log:@"虚拟定时器掩码自愈：核 %lu 空闲 200 ms 没有定时器退出（掩码=%@ active=%@）",
+		 (unsigned long)cpuIndex, wasMasked ? @"是" : @"否", wasActive ? @"是" : @"否"];
 	}
 }
 
@@ -1049,6 +1102,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 				_vtimerMasked[cpuIndex] = YES;
 				_vtimerPendingCount++;
 				__atomic_add_fetch(&_vtimerExitCount, 1, __ATOMIC_RELAXED);
+				__atomic_add_fetch(&_vtimerTally[cpuIndex], 1, __ATOMIC_RELAXED);
 				if (_vtimerLogCount < 3) {
 					_vtimerLogCount++;
 					uint64_t pc = 0;
@@ -1104,8 +1158,6 @@ static NSString *VLCPURestName(uint32_t reason) {
 		uint64_t pc = 0;
 		[_hypervisor getRegister:VLHypervisorRegisterPC value:&pc forVCPU:vcpu];
 		[self noteCPURest:pc reason:exceptionClass forCPU:cpuIndex];
-		// 客户机自己关了中断（PSTATE.I=1）还执行 WFI，在真机上也不会被唤醒；
-		// 这种情况照旧推进 PC，免得把整台机卡死在一条等不到事件的 WFI 上。
 		uint64_t cpsr = 0;
 		[_hypervisor getRegister:VLHypervisorRegisterCPSR value:&cpsr forVCPU:vcpu];
 		BOOL irqMasked = (cpsr & (1ULL << 7)) != 0;
@@ -1115,18 +1167,29 @@ static NSString *VLCPURestName(uint32_t reason) {
 		_wfiTrapCPSR[cpuIndex] = cpsr;
 		if (irqMasked && _wfiMaskedLogCount[cpuIndex] < 2) {
 			_wfiMaskedLogCount[cpuIndex]++;
-			uint32_t pending = [_interruptController highestPendingInterruptForCPU:(uint32_t)cpuIndex];
+			uint32_t highest = [_interruptController highestPendingInterruptForCPU:(uint32_t)cpuIndex];
 			[VLStartupLog log:@"核 %lu 关中断执行 WFI/WFE：PC=0x%llx，挂起中断 %u",
-			 (unsigned long)cpuIndex, (unsigned long long)pc, pending];
+			 (unsigned long)cpuIndex, (unsigned long long)pc, highest];
 		}
-		if (!irqMasked &&
-			![_interruptController hasPendingInterruptForCPU:(uint32_t)cpuIndex]) {
-			// 每次重试 ≈ 1 ms，攒到 0.5 秒记一行：卡死时能直接看出哪个核在空等。
+		BOOL pending = [_interruptController hasPendingInterruptForCPU:(uint32_t)cpuIndex];
+		if (!pending) {
+			// 没有可投递的中断就谁也叫不醒这台核——真机上 WFI 会一直睡到 IRQ/FIQ 线
+			// 拉起来，和 PSTATE.I 无关。0.1.4 把「关中断的 WFI」当成 nop 直接 PC+4，
+			// 客户机的 idle 循环就变成每 2 微秒一次 WFI 的忙等，6 个核把宿主吃到 473%，
+			// 还跟定时器线程抢 CPU。
 			_wfiWaits[cpuIndex]++;
 			if (_wfiWaits[cpuIndex] == 500 && _wfiStallLogCount < 8) {
 				_wfiStallLogCount++;
 				[VLStartupLog log:@"核 %lu 在 WFI 上已等 0.5 秒：PC=0x%llx，没有可投递的中断",
 				 (unsigned long)cpuIndex, (unsigned long long)pc];
+			}
+			// 掩码自愈：HVF 的虚拟定时器掩码只该覆盖「客户机还没 EOI 掉 27」这一小段。
+			// 这个核已经空闲 200 ms 却一次定时器退出都没来，就是掩码（或 active 位）
+			// 卡住了；不救回来这个核的 tick 永久停摆（0.1.4 里 CPU1 就是这样：
+			// rcu 报 timer-softirq=0、watchdog 报 hard LOCKUP）。
+			if (_wfiWaits[cpuIndex] >= 200) {
+				[self recoverStuckVirtualTimerForCPU:cpuIndex vcpu:vcpu];
+				_wfiWaits[cpuIndex] = 0;
 			}
 			usleep(1000);
 			return YES;

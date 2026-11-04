@@ -42,4 +42,12 @@ void VLSetProcessorIndexForCurrentThread(uint32_t index);
 /// 诊断用：日志里能直接看出「有挂起但一直取不走」的是哪一个中断。
 - (uint32_t)highestPendingInterruptForCPU:(uint32_t)cpu;
 
+/// 这个中断在某个核上是不是还停在「已确认、未 EOI」的 active 状态。
+/// 诊断用：active 卡住会让挂起位永远投递不出去，中断线也一直是低的。
+- (BOOL)isInterruptActive:(uint32_t)irq forCPU:(uint32_t)cpu;
+
+/// 强行清掉某个核上某个中断的 active 状态并刷新中断线。
+/// 只给「掩码自愈」用：EOI 万一没走到，这个核的中断就永久投递不出去了。
+- (void)releaseInterruptIfStuck:(uint32_t)irq forCPU:(uint32_t)cpu;
+
 @end

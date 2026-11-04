@@ -189,6 +189,26 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	return [self highestPendingInterruptForCPU:cpu] != VLGICSpuriousIRQ;
 }
 
+- (BOOL)isInterruptActive:(uint32_t)irq forCPU:(uint32_t)cpu {
+	if (irq >= VLGIC_MAXIMUM_IRQ || cpu >= _cpuCount) {
+		return NO;
+	}
+	[_lock lock];
+	BOOL active = _active[cpu * VLGIC_MAXIMUM_IRQ + irq];
+	[_lock unlock];
+	return active;
+}
+
+- (void)releaseInterruptIfStuck:(uint32_t)irq forCPU:(uint32_t)cpu {
+	if (irq >= VLGIC_MAXIMUM_IRQ || cpu >= _cpuCount) {
+		return;
+	}
+	[_lock lock];
+	_active[cpu * VLGIC_MAXIMUM_IRQ + irq] = NO;
+	[_lock unlock];
+	[self refreshLines];
+}
+
 #pragma mark - 中断线
 
 - (void)refreshLines {
