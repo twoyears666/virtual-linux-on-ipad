@@ -14,14 +14,14 @@ static const uint32_t VLPVPanicEventCrashLoaded = 0x2;
 @implementation VLPVPanicDevice {
 	BOOL _reported;
 	uint64_t _baseAddress;
-	uint64_t _regionSize;
+	uint32_t _regionSize;
 }
 
 - (uint64_t)baseAddress {
 	return _baseAddress;
 }
 
-- (uint64_t)regionSize {
+- (uint32_t)regionSize {
 	return _regionSize;
 }
 
