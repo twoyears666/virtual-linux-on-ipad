@@ -38,4 +38,8 @@ void VLSetProcessorIndexForCurrentThread(uint32_t index);
 /// WFI 陷入靠它判断能不能算完成：没有中断可投递就不该让客户机继续往下跑。
 - (BOOL)hasPendingInterruptForCPU:(uint32_t)cpu;
 
+/// 这个核当前最高优先级的待投递中断号；没有时返回 1023（spurious）。
+/// 诊断用：日志里能直接看出「有挂起但一直取不走」的是哪一个中断。
+- (uint32_t)highestPendingInterruptForCPU:(uint32_t)cpu;
+
 @end
