@@ -82,6 +82,10 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	/// 客户机因为「有中断」退出、读 IAR 却拿到 1023（空中断）时记几行：
 	/// 这说明下发到 HVF 的电平和 GIC 认为能投递的中断对不上。
 	NSUInteger _spuriousAckLogCount;
+	/// 每个核一个线程在跑，GIC 的挂起状态会被多个线程同时读写（本核 ack、别的核发 SGI、
+	/// 定时器线程投递）。不加锁时两个线程的「刷新中断线」会互相踩掉一次电平变化，
+	/// 结果就是「有中断挂起、线却是低」——IPI 直接丢掉（0.1.3 日志里核 0 的 SGI 0 就是这样）。
+	NSRecursiveLock *_lock;
 	NSUInteger _cpuCount;
 }
 
@@ -89,6 +93,7 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	self = [super init];
 	if (self) {
 		_baseAddress = baseAddress;
+		_lock = [[NSRecursiveLock alloc] init];
 		_cpuCount = MAX((NSUInteger)1, MIN(cpuCount, (NSUInteger)VLGIC_MAXIMUM_CPUS));
 		// GICv2：分发器 4 KB + CPU 接口 8 KB。CPU 接口是各核「共用同一个地址窗口、
 		// 寄存器按核 banking」的，所以窗口只有一份，不能按核数把地址往后排。
@@ -163,6 +168,7 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 }
 
 - (uint32_t)highestPendingInterruptForCPU:(uint32_t)cpu {
+	[_lock lock];
 	uint32_t best = VLGICSpuriousIRQ;
 	uint8_t bestPriority = 0xFF;
 	for (uint32_t irq = 0; irq < VLGIC_MAXIMUM_IRQ; irq++) {
@@ -175,6 +181,7 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 			best = irq;
 		}
 	}
+	[_lock unlock];
 	return best;
 }
 
@@ -185,43 +192,56 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 #pragma mark - 中断线
 
 - (void)refreshLines {
+	[_lock lock];
 	for (NSUInteger cpu = 0; cpu < _cpuCount; cpu++) {
 		uint32_t highest = [self highestPendingInterruptForCPU:(uint32_t)cpu];
 		BOOL asserted = highest != VLGICSpuriousIRQ;
-		if (asserted == _lineAsserted[cpu]) {
-			continue;
-		}
+		BOOL changed = asserted != _lineAsserted[cpu];
 		_lineAsserted[cpu] = asserted;
-		if (_lineLogCount < 16) {
+		if (changed && _lineLogCount < 16) {
 			_lineLogCount++;
 			[VLStartupLog log:@"GIC 中断线：核 %lu %@（最高挂起中断 %u）",
 						  (unsigned long)cpu, asserted ? @"拉高" : @"拉低", highest];
 		}
+		// 无条件下发：只在电平变化时下发的话，另一个核的线程并发改状态时会
+		// 「看起来没变化」而不通知，中断线就永远停在低电平上（丢 IPI）。
 		if (self.irqLineHandler != nil) {
 			self.irqLineHandler((uint32_t)cpu, asserted);
 		}
 	}
+	[_lock unlock];
 }
 
 - (void)setIRQPending:(uint32_t)irq {
 	if (irq >= VLGIC_MAXIMUM_IRQ) {
 		return;
 	}
+	[_lock lock];
 	[self setInterrupt:irq pending:YES forCPU:[self currentCPU]];
 	[self refreshLines];
+	[_lock unlock];
 }
 
 - (void)clearIRQPending:(uint32_t)irq {
 	if (irq >= VLGIC_MAXIMUM_IRQ) {
 		return;
 	}
+	[_lock lock];
 	[self setInterrupt:irq pending:NO forCPU:[self currentCPU]];
 	[self refreshLines];
+	[_lock unlock];
 }
 
 #pragma mark - 读
 
 - (uint32_t)readAtOffset:(uint32_t)offset width:(uint32_t)width {
+	[_lock lock];
+	uint32_t value = [self readLockedAtOffset:offset width:width];
+	[_lock unlock];
+	return value;
+}
+
+- (uint32_t)readLockedAtOffset:(uint32_t)offset width:(uint32_t)width {
 	if (offset < 0x1000) {
 		return [self readDistributorAtOffset:offset width:width];
 	}
@@ -296,6 +316,12 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 #pragma mark - 写
 
 - (void)writeAtOffset:(uint32_t)offset width:(uint32_t)width value:(uint32_t)value {
+	[_lock lock];
+	[self writeLockedAtOffset:offset width:width value:value];
+	[_lock unlock];
+}
+
+- (void)writeLockedAtOffset:(uint32_t)offset width:(uint32_t)width value:(uint32_t)value {
 	if (offset < 0x1000) {
 		[self writeDistributorAtOffset:offset width:width value:value];
 		return;
