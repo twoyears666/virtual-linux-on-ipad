@@ -17,8 +17,13 @@ static const uint32_t VLPVPanicEventCrashLoaded = 0x2;
 	uint64_t _regionSize;
 }
 
-@synthesize baseAddress = _baseAddress;
-@synthesize regionSize = _regionSize;
+- (uint64_t)baseAddress {
+	return _baseAddress;
+}
+
+- (uint64_t)regionSize {
+	return _regionSize;
+}
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress {
 	self = [super init];
