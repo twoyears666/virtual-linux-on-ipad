@@ -27,18 +27,60 @@
 #define VLVirtioRegisterInterruptStatus 0x060
 #define VLVirtioRegisterInterruptACK 0x064
 #define VLVirtioRegisterStatus 0x070
+
+// modern v2 多出来的队列地址寄存器：描述符区、驱动区（avail）、设备区（used）分开给。
+#define VLVirtioRegisterQueueReady 0x044
+#define VLVirtioRegisterQueueDescLow 0x080
+#define VLVirtioRegisterQueueDescHigh 0x084
+#define VLVirtioRegisterQueueDriverLow 0x090
+#define VLVirtioRegisterQueueDriverHigh 0x094
+#define VLVirtioRegisterQueueDeviceLow 0x0A0
+#define VLVirtioRegisterQueueDeviceHigh 0x0A4
+#define VLVirtioRegisterConfigGeneration 0x0FC
 #define VLVirtioConfigOffset 0x100
 
 #define VLVirtioMaximumQueues 2
 #define VLVirtioMaximumChainLength 16
 #define VLVirtioMaximumNotificationsPerRun 32
 
+static uint64_t VLAlignUp64(uint64_t value, uint64_t alignment);
+
 typedef struct {
 	uint32_t num;
 	uint32_t align;
+	/// legacy v1：描述符表的页帧号；modern v2 时代码改用下面的三个地址。
 	uint32_t pfn;
+	/// modern v2：三个区域各自的客户机物理地址，由 QueueDescLow/High 等寄存器写入。
+	uint64_t descAddress;
+	uint64_t driverAddress;
+	uint64_t deviceAddress;
+	BOOL ready;
 	uint32_t lastAvailable;
 } VLVirtioQueueState;
+
+/// 队列三个区域的地址。modern 优先用客户机写进来的三个地址，
+/// 没写就按 legacy 的 pfn + 4 KB 对齐规则推出来。
+static void VLVirtioQueueLayout(VLVirtioQueueState *state,
+								uint64_t *descriptorBase,
+								uint64_t *availableBase,
+								uint64_t *usedBase) {
+	if (state->descAddress != 0) {
+		*descriptorBase = state->descAddress;
+		*availableBase = state->driverAddress != 0
+			? state->driverAddress
+			: state->descAddress + (uint64_t)state->num * 16ULL;
+		*usedBase = state->deviceAddress != 0
+			? state->deviceAddress
+			: VLAlignUp64(*availableBase + 6ULL + (uint64_t)state->num * 2ULL, 4096);
+		return;
+	}
+
+	uint64_t descriptorBase = (uint64_t)state->pfn * 4096ULL;
+	uint64_t alignment = state->align >= 4096 ? state->align : 4096;
+	*descriptorBase = descriptorBase;
+	*availableBase = descriptorBase + VLAlignUp64((uint64_t)state->num * 16ULL, alignment);
+	*usedBase = *availableBase + VLAlignUp64(6ULL + (uint64_t)state->num * 2ULL, alignment);
+}
 
 static uint64_t VLAlignUp64(uint64_t value, uint64_t alignment) {
 	return (value + alignment - 1) & ~(alignment - 1);
@@ -162,7 +204,9 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 		return 0x74726976;
 	}
 	if (offset == VLVirtioRegisterVersion) {
-		return 1; // legacy v1，客户机按老队列布局访问
+		// modern v2：队列用 QueueReady + 三段地址寄存器，内核会走现代 virtio 路径，
+		// 不再有 legacy 的 PFN/对齐规则，也不再打「legacy 将来不支援」的警告。
+		return 2;
 	}
 	if (offset == VLVirtioRegisterDeviceID) {
 		return [self virtioDeviceID];
@@ -171,10 +215,39 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 		return 0x1AF4;
 	}
 	if (offset == VLVirtioRegisterDeviceFeatures) {
-		return _deviceFeaturesSel == 0 ? [self virtioDeviceFeatures] : 0;
+		if (_deviceFeaturesSel == 0) {
+			return [self virtioDeviceFeatures];
+		}
+		// 高 32 位的 bit 0 就是 VIRTIO_F_VERSION_1（总第 32 位）：
+		// modern 设备必须声明它，否则内核拒绝按 v2 驱动。
+		return _deviceFeaturesSel == 1 ? 1u : 0u;
 	}
 	if (offset == VLVirtioRegisterQueueNumMax) {
 		return [self queueNumMax];
+	}
+	if (offset == VLVirtioRegisterQueueReady) {
+		return _queues[_queueSelect].ready ? 1 : 0;
+	}
+	if (offset == VLVirtioRegisterQueueDescLow) {
+		return (uint32_t)(_queues[_queueSelect].descAddress & 0xFFFFFFFF);
+	}
+	if (offset == VLVirtioRegisterQueueDescHigh) {
+		return (uint32_t)(_queues[_queueSelect].descAddress >> 32);
+	}
+	if (offset == VLVirtioRegisterQueueDriverLow) {
+		return (uint32_t)(_queues[_queueSelect].driverAddress & 0xFFFFFFFF);
+	}
+	if (offset == VLVirtioRegisterQueueDriverHigh) {
+		return (uint32_t)(_queues[_queueSelect].driverAddress >> 32);
+	}
+	if (offset == VLVirtioRegisterQueueDeviceLow) {
+		return (uint32_t)(_queues[_queueSelect].deviceAddress & 0xFFFFFFFF);
+	}
+	if (offset == VLVirtioRegisterQueueDeviceHigh) {
+		return (uint32_t)(_queues[_queueSelect].deviceAddress >> 32);
+	}
+	if (offset == VLVirtioRegisterConfigGeneration) {
+		return 0;
 	}
 	if (offset == VLVirtioRegisterQueueNum) {
 		return _queues[_queueSelect].num;
@@ -216,6 +289,42 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 	}
 	if (offset == VLVirtioRegisterQueueNum) {
 		_queues[_queueSelect].num = MIN(value, [self queueNumMax]);
+		return;
+	}
+	// modern v2 的队列描述：QueueReady + 三段地址（描述符 / 驱动 / 设备）。
+	if (offset == VLVirtioRegisterQueueReady) {
+		_queues[_queueSelect].ready = (value & 1) != 0;
+		_queues[_queueSelect].lastAvailable = 0;
+		return;
+	}
+	if (offset == VLVirtioRegisterQueueDescLow) {
+		_queues[_queueSelect].descAddress =
+			(_queues[_queueSelect].descAddress & ~0xFFFFFFFFULL) | (uint64_t)value;
+		return;
+	}
+	if (offset == VLVirtioRegisterQueueDescHigh) {
+		_queues[_queueSelect].descAddress =
+			(_queues[_queueSelect].descAddress & 0xFFFFFFFFULL) | ((uint64_t)value << 32);
+		return;
+	}
+	if (offset == VLVirtioRegisterQueueDriverLow) {
+		_queues[_queueSelect].driverAddress =
+			(_queues[_queueSelect].driverAddress & ~0xFFFFFFFFULL) | (uint64_t)value;
+		return;
+	}
+	if (offset == VLVirtioRegisterQueueDriverHigh) {
+		_queues[_queueSelect].driverAddress =
+			(_queues[_queueSelect].driverAddress & 0xFFFFFFFFULL) | ((uint64_t)value << 32);
+		return;
+	}
+	if (offset == VLVirtioRegisterQueueDeviceLow) {
+		_queues[_queueSelect].deviceAddress =
+			(_queues[_queueSelect].deviceAddress & ~0xFFFFFFFFULL) | (uint64_t)value;
+		return;
+	}
+	if (offset == VLVirtioRegisterQueueDeviceHigh) {
+		_queues[_queueSelect].deviceAddress =
+			(_queues[_queueSelect].deviceAddress & 0xFFFFFFFFULL) | ((uint64_t)value << 32);
 		return;
 	}
 	if (offset == VLVirtioRegisterQueueAlign) {
@@ -276,14 +385,19 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 	}
 
 	VLVirtioQueueState *state = &_queues[index];
-	if (state->num == 0 || state->pfn == 0) {
+	if (state->num == 0 || (state->pfn == 0 && state->descAddress == 0)) {
+		return;
+	}
+	// modern 的队列要先由驱动写 QueueReady=1 才算就绪，通知才会被处理。
+	if (state->descAddress != 0 && !state->ready) {
 		return;
 	}
 
-	uint64_t descriptorBase = (uint64_t)state->pfn * 4096ULL;
-	uint64_t alignment = state->align >= 4096 ? state->align : 4096;
-	uint64_t availableBase =
-		descriptorBase + VLAlignUp64((uint64_t)state->num * 16ULL, alignment);
+	uint64_t descriptorBase = 0;
+	uint64_t availableBase = 0;
+	uint64_t usedBase = 0;
+	VLVirtioQueueLayout(state, &descriptorBase, &availableBase, &usedBase);
+	(void)usedBase;
 
 	const uint8_t *availableIndexPointer =
 		[_guestMemory hostPointerForGuestAddress:availableBase + 2 length:2];
@@ -339,16 +453,16 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 		return;
 	}
 	VLVirtioQueueState *state = &_queues[queueIndex];
-	if (state->num == 0 || state->pfn == 0) {
+	if (state->num == 0 || (state->pfn == 0 && state->descAddress == 0)) {
 		return;
 	}
 
-	uint64_t descriptorBase = (uint64_t)state->pfn * 4096ULL;
-	uint64_t alignment = state->align >= 4096 ? state->align : 4096;
-	uint64_t availableBase =
-		descriptorBase + VLAlignUp64((uint64_t)state->num * 16ULL, alignment);
-	uint64_t usedBase =
-		availableBase + VLAlignUp64(6ULL + (uint64_t)state->num * 2ULL, alignment);
+	uint64_t descriptorBase = 0;
+	uint64_t availableBase = 0;
+	uint64_t usedBase = 0;
+	VLVirtioQueueLayout(state, &descriptorBase, &availableBase, &usedBase);
+	(void)descriptorBase;
+	(void)availableBase;
 
 	uint8_t *usedIndexPointer = [_guestMemory hostPointerForGuestAddress:usedBase + 2 length:2];
 	if (usedIndexPointer == NULL) {
