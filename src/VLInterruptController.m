@@ -79,6 +79,9 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 	/// 中断线变化和 IAR 确认各只记前 16 条：卡死时看这两组日志就知道中断到底送到了没。
 	NSUInteger _lineLogCount;
 	NSUInteger _ackLogCount;
+	/// 客户机因为「有中断」退出、读 IAR 却拿到 1023（空中断）时记几行：
+	/// 这说明下发到 HVF 的电平和 GIC 认为能投递的中断对不上。
+	NSUInteger _spuriousAckLogCount;
 	NSUInteger _cpuCount;
 }
 
@@ -271,6 +274,12 @@ static void VLWriteRegister(uint8_t *registers, uint32_t offset, uint32_t width,
 - (uint32_t)acknowledgeInterruptForCPU:(uint32_t)cpu {
 	uint32_t irq = [self highestPendingInterruptForCPU:cpu];
 	if (irq == VLGICSpuriousIRQ) {
+		// 客户机是因为「有线拉高」才进来的，却一个中断都拿不到：把当时的状态记下来。
+		if (_spuriousAckLogCount < 4) {
+			_spuriousAckLogCount++;
+			[VLStartupLog log:@"GIC 投递了空中断：核 %u 读 IAR 拿到 1023（中断线%@）",
+			 cpu, _lineAsserted[cpu] ? @"仍为高" : @"为低"];
+		}
 		return VLGICSpuriousIRQ;
 	}
 	[self setInterrupt:irq pending:NO forCPU:cpu];

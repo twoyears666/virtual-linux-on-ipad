@@ -31,7 +31,6 @@ NSString *const VLLinuxVirtualMachineErrorDomain = @"com.twoyears666.virtuallinu
 
 // 客户机物理地址规划（和 VLDeviceTree 里声明的一致）
 static const uint64_t VLGuestMemoryBase = 0x80000000;
-static const uint64_t VLKernelLoadOffset = 0x80000;
 static const uint64_t VLPageSize = 0x1000;
 static const uint64_t VLSegmentAlignment = 0x200000;
 static const uint64_t VLUARTBase = 0x09000000;
@@ -85,6 +84,36 @@ typedef struct {
 
 static uint64_t VLAlignUp(uint64_t value, uint64_t alignment) {
 	return (value + alignment - 1) & ~(alignment - 1);
+}
+
+/// 读 arm64 Image 头部：偏移 0x08 是 text_offset，0x10 是 image_size（含 BSS，
+/// 比文件长度大）。返回 NO 表示这不像一个 Image 头，调用方按旧约定处理。
+static BOOL VLReadKernelImageHeader(NSData *kernel, NSString *path,
+									uint64_t *textOffset, uint64_t *imageSize) {
+	NSData *head = nil;
+	if (kernel.length >= 0x40) {
+		head = [kernel subdataWithRange:NSMakeRange(0, 0x40)];
+	} else if (path.length > 0) {
+		head = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:NULL];
+		if (head.length > 0x40) {
+			head = [head subdataWithRange:NSMakeRange(0, 0x40)];
+		}
+	}
+	if (head.length < 0x40) {
+		return NO;
+	}
+	const uint8_t *bytes = head.bytes;
+	uint64_t offset = 0;
+	uint64_t size = 0;
+	memcpy(&offset, bytes + 0x08, sizeof(offset));
+	memcpy(&size, bytes + 0x10, sizeof(size));
+	// 头部字段明显不合理就当没有头：宁可多加 2 MB 空隙，也不要把设备树写进内核保留区。
+	if (size == 0 || size > (1ULL << 32)) {
+		return NO;
+	}
+	*textOffset = offset;
+	*imageSize = size;
+	return YES;
 }
 
 /// 诊断标签：0 表示刚进客户机（还没退出），其余是异常的 EC 值。
@@ -362,6 +391,12 @@ static NSString *VLCPURestName(uint32_t reason) {
 		uint64_t exitDelta = exits - _cpuExitSampled[index];
 		_cpuExitSampled[index] = exits;
 		[text appendFormat:@"[退出+%llu]", (unsigned long long)exitDelta];
+		// 中断线：设备侧看到的电平 / 已经下发给 HVF 的电平。两者不一致说明下发这一步没走到；
+		// 两者都是高却仍然等不到中断，问题就在 HVF 的投递上。
+		[text appendFormat:@"[线=%@ 下发=%@ 挂起=%u]",
+		 _irqLineLevel[index] ? @"高" : @"低",
+		 _irqLineApplied[index] ? @"高" : @"低",
+		 [_interruptController highestPendingInterruptForCPU:(uint32_t)index]];
 	}
 	return text;
 }
@@ -435,18 +470,15 @@ static NSString *VLCPURestName(uint32_t reason) {
 	}
 }
 
-/// 由各核自己的线程调用：把设备侧的最新电平同步给 HVF（升和降都要同步）。
+/// 由各核自己的线程调用：把设备侧的最新电平同步给 HVF。
+/// 每一轮都必须重新下发，不能只在电平变化时下发：核在 WFI 里等中断时，
+/// HVF 处理完一次 WFI 退出后 pending 位可能被吃掉，之后我们再也不下发，
+/// 这个核就永远等不到中断（0.1.2 日志里核 0 的 INTID 27 就是这样丢掉的）。
 - (void)injectPendingIRQForCPU:(NSUInteger)index vcpu:(uint64_t)vcpu {
 	[_startCondition lock];
 	BOOL level = _irqLineLevel[index];
-	BOOL needed = level != _irqLineApplied[index];
-	if (needed) {
-		_irqLineApplied[index] = level;
-	}
+	_irqLineApplied[index] = level;
 	[_startCondition unlock];
-	if (!needed) {
-		return;
-	}
 	int32_t result = [_hypervisor setPendingIRQ:level forVCPU:vcpu];
 	if (result != 0 && _irqInjectFailureCount < 4) {
 		_irqInjectFailureCount++;
@@ -692,8 +724,14 @@ static NSString *VLCPURestName(uint32_t reason) {
 	NSData *diskKernel = [bootVolume dataForFileNamed:@"VMLINUZ" error:NULL];
 	NSData *diskInitrd = [bootVolume dataForFileNamed:@"INITRD" error:NULL];
 
-	// 内核：Image 直接按原始偏移装载，入口地址就是装载地址。
-	uint64_t kernelAddress = VLGuestMemoryBase + VLKernelLoadOffset;
+	// 内核：arm64 Image 头里的 text_offset 现在是 0，要求装到 2 MiB 对齐的物理地址。
+	// 之前按老约定再加 0x80000，客户机直接报 "[Firmware Bug]: Kernel image misaligned
+	// at boot"，运行时虚拟地址也整体高了 0x80000，日志里的 PC 全都对不上 kallsyms。
+	uint64_t kernelTextOffset = 0;
+	uint64_t kernelImageSize = 0;
+	BOOL hasKernelHeader = VLReadKernelImageHeader(diskKernel, _configuration.kernelPath,
+												   &kernelTextOffset, &kernelImageSize);
+	uint64_t kernelAddress = VLGuestMemoryBase + (hasKernelHeader ? kernelTextOffset : 0);
 	NSInteger kernelSize = 0;
 	if (diskKernel.length > 0) {
 		kernelSize = [_guestMemory writeData:diskKernel atGuestAddress:kernelAddress]
@@ -714,7 +752,10 @@ static NSString *VLCPURestName(uint32_t reason) {
 	// 内核可能有十几 MB，装进客户机内存后立刻放掉。
 	diskKernel = nil;
 
-	uint64_t cursor = VLAlignUp(kernelAddress + (uint64_t)kernelSize, VLSegmentAlignment);
+	// 内核头部声明的 image_size 含 BSS，比文件本身大。设备树必须放在这块保留区之外，
+	// 否则内核启动后会把还在用的设备树当成空闲内存收走。
+	uint64_t kernelFootprint = MAX((uint64_t)kernelSize, kernelImageSize);
+	uint64_t cursor = VLAlignUp(kernelAddress + kernelFootprint, VLSegmentAlignment);
 
 	// 设备树
 	uint64_t deviceTreeAddress = cursor;
