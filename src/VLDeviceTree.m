@@ -21,6 +21,11 @@ uint64_t VLDeviceTreeConsoleBase(void) {
 	return 0x0F000000;
 }
 
+/// pvpanic 与控制台同段，往后隔一页，避免和设备树节点地址重叠。
+uint64_t VLDeviceTreePVPanicBase(void) {
+	return 0x0F100000;
+}
+
 
 static const NSUInteger VLFDTMaximumCPUs = 8;
 
@@ -244,6 +249,18 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 					   @((uint32_t)(VLDeviceTreeConsoleBase() & 0xFFFFFFFF)), @0, @0x1000,
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @7, @4 ]];
+	[self endNode];
+
+	// pvpanic：QEMU 兼容的 MMIO panic 上报，客户机 panic 时写事件位，
+	// 宿主侧立刻能知道，不用等 watchdog 或 rcu stall 才开始查。
+	[self beginNode:[NSString stringWithFormat:@"pvpanic@%llx",
+					 (unsigned long long)VLDeviceTreePVPanicBase()]];
+	[self propertyNamed:@"compatible" string:@"qemu,pvpanic-mmio"];
+	[self propertyNamed:@"reg"
+				   cells:@[
+					   @((uint32_t)(VLDeviceTreePVPanicBase() >> 32)),
+					   @((uint32_t)(VLDeviceTreePVPanicBase() & 0xFFFFFFFF)), @0, @0x1000,
+				   ]];
 	[self endNode];
 
 	// 安装镜像（只读光驱）：SPI 6（没选 ISO 就不声明）

@@ -20,6 +20,7 @@
 #import "VLInterruptController.h"
 #import "VLNetStack.h"
 #import "VLPL011Serial.h"
+#import "VLPVPanicDevice.h"
 #import "VLStartupLog.h"
 #import "VLVMConfiguration.h"
 #import "VLVirtioBlock.h"
@@ -141,6 +142,7 @@ static NSString *VLCPURestName(uint32_t reason) {
 	VLVirtioInput *_input;
 	VLVirtioNet *_net;
 	VLVirtioConsole *_console;
+	VLPVPanicDevice *_pvPanic;
 	VLNetStack *_network;
 	VLVirtioBlock *_iso;
 
@@ -1070,6 +1072,13 @@ static NSString *VLCPURestName(uint32_t reason) {
 									 interruptController:_interruptController];
 	[_deviceBus addDevice:_console];
 
+	// pvpanic：客户机 panic 时主动告诉我们，而不是等 20 秒后的 rcu stall。
+	_pvPanic = [[VLPVPanicDevice alloc] initWithBaseAddress:VLDeviceTreePVPanicBase()];
+	_pvPanic.panicHandler = ^(NSString *reason) {
+		[VLStartupLog log:@"客户机 panic：%@", reason];
+	};
+	[_deviceBus addDevice:_pvPanic];
+
 	// 把这一轮真实的 MMIO 布局记下来：以后再出现「未实现的 MMIO 地址」，
 	// 一眼就能对出是哪个区间少挂了设备。
 	[VLStartupLog log:@"MMIO 布局：GIC 0x%llx(+0x%x)、UART 0x%llx、GPU 0x%llx、block 0x%llx(%@)、"
@@ -1683,6 +1692,7 @@ static uint64_t VLGuestCounterValue(void) {
 	_input = nil;
 	_net = nil;
 	_console = nil;
+	_pvPanic = nil;
 	[_network stop];
 	_network = nil;
 }

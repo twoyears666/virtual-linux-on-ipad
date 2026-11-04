@@ -7,6 +7,9 @@
 /// virtio-console 的 MMIO 基址：设备树节点和 VMM 侧注册必须用同一个值。
 uint64_t VLDeviceTreeConsoleBase(void);
 
+/// pvpanic（QEMU 兼容的 MMIO panic 上报设备）的基址。
+uint64_t VLDeviceTreePVPanicBase(void);
+
 /// 自己拼 FDT（flattened device tree）：把内存、CPU、GIC、定时器、串口和 virtio-mmio 声明给客户机内核。
 /// 不依赖任何第三方 DTB，布局完全按本项目的 MMIO 规划来。
 @interface VLDeviceTree : NSObject
