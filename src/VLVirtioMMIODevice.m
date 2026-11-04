@@ -75,10 +75,10 @@ static void VLVirtioQueueLayout(VLVirtioQueueState *state,
 		return;
 	}
 
-	uint64_t descriptorBase = (uint64_t)state->pfn * 4096ULL;
+	uint64_t legacyDescriptorBase = (uint64_t)state->pfn * 4096ULL;
 	uint64_t alignment = state->align >= 4096 ? state->align : 4096;
-	*descriptorBase = descriptorBase;
-	*availableBase = descriptorBase + VLAlignUp64((uint64_t)state->num * 16ULL, alignment);
+	*descriptorBase = legacyDescriptorBase;
+	*availableBase = legacyDescriptorBase + VLAlignUp64((uint64_t)state->num * 16ULL, alignment);
 	*usedBase = *availableBase + VLAlignUp64(6ULL + (uint64_t)state->num * 2ULL, alignment);
 }
 
