@@ -17,7 +17,6 @@
 #import "VLGuestMemory.h"
 #import "VLHostCapabilities.h"
 #import "VLHypervisor.h"
-#import "VLISOInstaller.h"
 #import "VLInterruptController.h"
 #import "VLNetStack.h"
 #import "VLPL011Serial.h"
@@ -931,34 +930,9 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 		return NO;
 	}
 
-	// 从系统盘启动时用安装器写下的那份命令行（里面有真实的 root=），
-	// 从 ISO 安装内核启动时才需要接上自动安装参数。
-	// 早期导入的 ISO、或者自动应答文件跟着存储位置搬了家，preseed 会找不到；
-	// 这里按机器目录补写一份，否则安装器每次都停在手动的语言选择页。
-	if (bootsFromInstallerKernel && bootVolume.commandLine.length == 0) {
-		NSString *preseedPath = _configuration.preseedPath;
-		if (preseedPath.length == 0 ||
-			![NSFileManager.defaultManager fileExistsAtPath:preseedPath]) {
-			preseedPath = [[_configuration.rootPath stringByAppendingPathComponent:@"autoinstall"]
-				stringByAppendingPathComponent:@"preseed.cfg"];
-			[NSFileManager.defaultManager createDirectoryAtPath:preseedPath.stringByDeletingLastPathComponent
-									withIntermediateDirectories:YES
-												 attributes:nil
-													  error:NULL];
-			NSError *preseedError = nil;
-			if ([[VLISOInstaller preseedContents] writeToFile:preseedPath
-													atomically:YES
-													  encoding:NSUTF8StringEncoding
-														 error:&preseedError]) {
-				_configuration.preseedPath = preseedPath;
-				[VLStartupLog log:@"自动应答缺失，已补写到 %@", preseedPath];
-			} else {
-				[VLStartupLog log:@"自动应答补写失败：%@", preseedError.localizedDescription];
-			}
-		}
-	}
-	BOOL hasPreseed = _configuration.preseedPath.length > 0 &&
-		[NSFileManager.defaultManager fileExistsAtPath:_configuration.preseedPath];
+	// 从系统盘启动时用安装器写下的那份命令行（里面有真实的 root=）。
+	// 用 ISO 安装内核启动时走安装器自己的交互流程：它现在能正常起来、也能读键盘，
+	// 不再塞 preseed 自动应答——否则每次挂上安装盘都会被重新分区。
 	NSMutableString *bootArguments = [NSMutableString stringWithString:
 		bootVolume.commandLine.length > 0
 			? bootVolume.commandLine
@@ -986,10 +960,6 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 									   withString:@""
 										  options:0
 											range:NSMakeRange(0, bootArguments.length)];
-	}
-	if (hasPreseed && bootVolume.commandLine.length == 0) {
-		[bootArguments appendString:
-			@" ip=dhcp auto=true priority=critical preseed/url=http://10.0.2.2/preseed.cfg"];
 	}
 	bootVolume = nil;
 
@@ -1161,12 +1131,6 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	// 网络：virtio-net 只负责搬帧，ARP/DHCP/DNS/TCP 代理都在 VLNetStack 里。
 	_network = [[VLNetStack alloc] init];
 	[_network start];
-	// 自动安装的 preseed 由网关上的极简 HTTP 服务发给客户机（bootargs 里 preseed/url 指向它）。
-	NSData *preseed = [NSData dataWithContentsOfFile:_configuration.preseedPath];
-	if (preseed.length > 0) {
-		[_network servePreseedContents:preseed];
-		[VLStartupLog log:@"已准备 preseed 自动应答（%lu 字节）", (unsigned long)preseed.length];
-	}
 	_net = [[VLVirtioNet alloc] initWithBaseAddress:VLNetBase
 									   guestMemory:_guestMemory
 								   interruptNumber:VLNetInterrupt

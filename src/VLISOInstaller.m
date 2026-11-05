@@ -262,10 +262,6 @@ static NSString *VLISOPreseedContents(void) {
 
 @implementation VLISOInstaller
 
-+ (NSString *)preseedContents {
-	return VLISOPreseedContents();
-}
-
 + (VLISOInstallResult *)prepareISOAtPath:(NSString *)isoPath
 						machineDirectory:(NSURL *)machineDirectory
 					   distroIdentifier:(NSString *)distroIdentifier
