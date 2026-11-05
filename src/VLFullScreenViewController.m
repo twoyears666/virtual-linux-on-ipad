@@ -64,14 +64,33 @@
 	return YES;
 }
 
-/// 客户机画面：铺满整屏，按 4:3 等比缩放，多余的地方自然留黑边。
+/// 客户机画面：整屏里放一块恒定的 4:3 区域并居中，多出来的部分留纯黑边。
+/// 台前调度把窗口拉成别的比例时，画面也不能跟着变形或被裁掉。
 - (void)buildDisplay {
+	UIView *stage = [[UIView alloc] init];
+	stage.translatesAutoresizingMaskIntoConstraints = NO;
+	stage.backgroundColor = UIColor.blackColor;
+	[self.view addSubview:stage];
+
+	NSLayoutConstraint *preferredWidth =
+		[stage.widthAnchor constraintEqualToAnchor:self.view.widthAnchor];
+	// 宽度先贴着整屏；窄高（竖屏）时由高度上限反过来压宽度，始终维持 4:3。
+	preferredWidth.priority = UILayoutPriorityDefaultHigh;
+	[NSLayoutConstraint activateConstraints:@[
+		[stage.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+		[stage.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+		preferredWidth,
+		[stage.widthAnchor constraintLessThanOrEqualToAnchor:self.view.widthAnchor],
+		[stage.heightAnchor constraintEqualToAnchor:stage.widthAnchor multiplier:0.75],
+		[stage.heightAnchor constraintLessThanOrEqualToAnchor:self.view.heightAnchor],
+	]];
+
 	VLDisplayView *display = [[VLDisplayView alloc] init];
 	display.translatesAutoresizingMaskIntoConstraints = NO;
 	display.layer.cornerRadius = 0.0;
 	display.layer.borderWidth = 0.0;
 	self.displayView = display;
-	[self.view addSubview:display];
+	[stage addSubview:display];
 
 	__weak typeof(self) weakSelf = self;
 	display.touchHandler = ^(VLDisplayTouchPhase phase, CGFloat x, CGFloat y) {
@@ -94,10 +113,10 @@
 	};
 
 	[NSLayoutConstraint activateConstraints:@[
-		[display.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-		[display.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-		[display.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-		[display.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+		[display.topAnchor constraintEqualToAnchor:stage.topAnchor],
+		[display.leadingAnchor constraintEqualToAnchor:stage.leadingAnchor],
+		[display.trailingAnchor constraintEqualToAnchor:stage.trailingAnchor],
+		[display.bottomAnchor constraintEqualToAnchor:stage.bottomAnchor],
 	]];
 }
 
