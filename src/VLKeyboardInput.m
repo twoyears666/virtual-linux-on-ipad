@@ -164,11 +164,34 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 	[self.field becomeFirstResponder];
 }
 
+/// 功能键对应的终端字符序列。安装器（d-i）的 stdin 是串口控制台，
+/// 它不读 evdev，只认 tty 上的字节，所以这些键也要额外往串口送一份。
+static NSString *VLTextForSpecialKeycode(uint16_t keycode) {
+	switch (keycode) {
+		case 1: return @"\x1b";     // Esc
+		case 15: return @"\t";      // Tab
+		case 28: return @"\r";      // Enter
+		case 14: return @"\x7f";    // Backspace
+		case 103: return @"\x1b[A"; // Up
+		case 108: return @"\x1b[B"; // Down
+		case 106: return @"\x1b[C"; // Right
+		case 105: return @"\x1b[D"; // Left
+		case 102: return @"\x1b[H"; // Home
+		case 107: return @"\x1b[F"; // End
+		case 111: return @"\x1b[3~"; // Delete
+		default: return nil;
+	}
+}
+
 - (void)sendKeycode:(uint16_t)keycode {
 	if (keycode == 0) {
 		return;
 	}
 	VLLinuxVirtualMachine *machine = self.machine;
+	NSString *text = VLTextForSpecialKeycode(keycode);
+	if (text.length > 0) {
+		[machine sendText:text];
+	}
 	[machine sendKeycode:keycode pressed:YES];
 	[machine sendKeycode:keycode pressed:NO];
 }
@@ -180,6 +203,8 @@ static uint16_t VLKeycodeForCharacter(unichar character, BOOL *needsShift) {
 		return;
 	}
 	VLLinuxVirtualMachine *machine = self.machine;
+	// 串口控制台这条路收的是字符，不是按键码，所以按原样再送一份。
+	[machine sendText:[NSString stringWithFormat:@"%C", character]];
 	if (needsShift) {
 		[machine sendKeycode:42 pressed:YES];
 	}

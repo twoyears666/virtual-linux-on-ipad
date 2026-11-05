@@ -54,6 +54,8 @@ static const uint32_t VLISOInterrupt = 38;
 /// virtio-console 在设备树里写的是 SPI 7，转成 INTID 就是 39。
 static const uint32_t VLConsoleInterrupt = 39;
 static const uint32_t VLPPIVirtualTimer = 27;
+/// PL011 在设备树里是 SPI 1，转成 INTID 就是 33。
+static const uint32_t VLUARTInterrupt = 33;
 
 /// HVC 调用（PSCI）里的功能号
 #define VL_PSCI_VERSION 0x84000000ULL
@@ -1044,7 +1046,9 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	};
 	[_deviceBus addDevice:_interruptController];
 
-	_serial = [[VLPL011Serial alloc] initWithBaseAddress:VLUARTBase];
+	_serial = [[VLPL011Serial alloc] initWithBaseAddress:VLUARTBase
+										  interruptNumber:VLUARTInterrupt
+										interruptController:_interruptController];
 	_serial.textHandler = ^(NSString *line) {
 		typeof(self) strongSelf = weakSelf;
 		if (strongSelf == nil) {
@@ -1854,6 +1858,11 @@ static uint64_t VLGuestCounterValue(void) {
 
 - (void)sendKeycode:(uint16_t)keycode pressed:(BOOL)pressed {
 	[_input sendKeycode:keycode pressed:pressed];
+	_inputServicePending = YES;
+}
+
+- (void)sendText:(NSString *)text {
+	[_serial injectText:text];
 	_inputServicePending = YES;
 }
 

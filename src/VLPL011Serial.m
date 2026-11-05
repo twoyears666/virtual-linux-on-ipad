@@ -3,13 +3,25 @@
 
 #import "VLPL011Serial.h"
 
+#import <string.h>
+
+#import "VLInterruptController.h"
+
 static const uint32_t VLPL011DataRegister = 0x000;
 static const uint32_t VLPL011FlagRegister = 0x018;
+static const uint32_t VLPL011InterruptMaskRegister = 0x038;
+static const uint32_t VLPL011RawInterruptStatus = 0x03C;
+static const uint32_t VLPL011MaskedInterruptStatus = 0x040;
+static const uint32_t VLPL011InterruptClearRegister = 0x044;
 /// TX FIFO 空（0x80）| RX FIFO 空（0x10）。
 static const uint32_t VLPL011FlagsIdle = 0x90;
+/// RXIM：接收 FIFO 有数据时触发中断。
+static const uint32_t VLPL011InterruptReceive = 0x10;
 /// PrimeCell 标识寄存器区：0xFE0–0xFFC 共 8 个字节。
 static const uint32_t VLPL011IdentifierStart = 0xFE0;
 static const uint32_t VLPL011IdentifierEnd = 0xFFC;
+/// 接收 FIFO 深度。安装器只会一次塞几个字符，64 足够。
+static const NSUInteger VLPL011ReceiveCapacity = 64;
 /// PL011 的 PrimeCell ID（PeripheralID0–3、PrimeCellID0–3）。
 /// amba 总线在 probe 时会读这一段来核对外设型号，读回全 0 就判 -ENODEV，
 /// ttyAMA0 根本不会注册——内核随后打印 `unable to open an initial console`，
@@ -31,30 +43,128 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 @implementation VLPL011Serial {
 	NSMutableString *_lineBuffer;
 	NSUInteger _writtenCharacterCount;
+	uint32_t _interruptMask;
+	uint32_t _rawInterruptStatus;
+	uint32_t _interruptNumber;
+	__weak VLInterruptController *_interruptController;
+	/// 接收 FIFO 是一个环形缓冲。读在 vCPU 线程、写在主线程，所以访问都要加锁。
+	uint8_t _receiveBuffer[64];
+	NSUInteger _receiveHead;
+	NSUInteger _receiveCount;
 }
 
-- (instancetype)initWithBaseAddress:(uint64_t)baseAddress {
+- (instancetype)initWithBaseAddress:(uint64_t)baseAddress
+					interruptNumber:(uint32_t)interruptNumber
+			  interruptController:(VLInterruptController *)interruptController {
 	self = [super init];
 	if (self) {
 		_baseAddress = baseAddress;
 		_regionSize = 0x1000;
 		_lineBuffer = [NSMutableString string];
+		_interruptNumber = interruptNumber;
+		_interruptController = interruptController;
 	}
 	return self;
 }
 
+- (void)injectText:(NSString *)text {
+	if (text.length == 0) {
+		return;
+	}
+	const char *bytes = text.UTF8String;
+	NSUInteger length = strlen(bytes);
+	@synchronized (self) {
+		for (NSUInteger index = 0; index < length; index++) {
+			if (_receiveCount >= VLPL011ReceiveCapacity) {
+				break;
+			}
+			NSUInteger tail = (_receiveHead + _receiveCount) % VLPL011ReceiveCapacity;
+			_receiveBuffer[tail] = (uint8_t)bytes[index];
+			_receiveCount++;
+		}
+		_rawInterruptStatus |= VLPL011InterruptReceive;
+	}
+	[self updateInterruptLine];
+}
+
+/// 有数据且 IMSC 打开了 RXIM 就拉中断，否则拉低。电平语义，每次状态变化都要下发。
+- (void)updateInterruptLine {
+	uint32_t pending = 0;
+	@synchronized (self) {
+		pending = _rawInterruptStatus & _interruptMask;
+	}
+	if (pending != 0) {
+		[_interruptController setIRQPending:_interruptNumber];
+	} else {
+		[_interruptController clearIRQPending:_interruptNumber];
+	}
+}
+
 - (uint32_t)readAtOffset:(uint32_t)offset width:(uint32_t)width {
+	if (offset == VLPL011DataRegister) {
+		uint8_t character = 0;
+		BOOL emptied = NO;
+		@synchronized (self) {
+			if (_receiveCount > 0) {
+				character = _receiveBuffer[_receiveHead];
+				_receiveHead = (_receiveHead + 1) % VLPL011ReceiveCapacity;
+				_receiveCount--;
+				if (_receiveCount == 0) {
+					_rawInterruptStatus &= ~VLPL011InterruptReceive;
+					emptied = YES;
+				}
+			}
+		}
+		// 读空了就把中断线拉低，否则电平会一直挂着。
+		if (emptied) {
+			[self updateInterruptLine];
+		}
+		return character;
+	}
 	if (offset == VLPL011FlagRegister) {
-		return VLPL011FlagsIdle;
+		BOOL empty = NO;
+		@synchronized (self) {
+			empty = _receiveCount == 0;
+		}
+		return 0x80 | (empty ? 0x10 : 0);
+	}
+	if (offset == VLPL011InterruptMaskRegister) {
+		@synchronized (self) {
+			return _interruptMask;
+		}
+	}
+	if (offset == VLPL011RawInterruptStatus) {
+		@synchronized (self) {
+			return _rawInterruptStatus;
+		}
+	}
+	if (offset == VLPL011MaskedInterruptStatus) {
+		@synchronized (self) {
+			return _rawInterruptStatus & _interruptMask;
+		}
 	}
 	if (offset >= VLPL011IdentifierStart && offset <= VLPL011IdentifierEnd) {
 		return VLPL011IdentifierRegister(offset);
 	}
-	// 数据寄存器恒为空，其余寄存器读 0。
+	// 其余寄存器读 0。
 	return 0;
 }
 
 - (void)writeAtOffset:(uint32_t)offset width:(uint32_t)width value:(uint32_t)value {
+	if (offset == VLPL011InterruptMaskRegister) {
+		@synchronized (self) {
+			_interruptMask = value;
+		}
+		[self updateInterruptLine];
+		return;
+	}
+	if (offset == VLPL011InterruptClearRegister) {
+		@synchronized (self) {
+			_rawInterruptStatus &= ~value;
+		}
+		[self updateInterruptLine];
+		return;
+	}
 	if (offset != VLPL011DataRegister) {
 		return;
 	}

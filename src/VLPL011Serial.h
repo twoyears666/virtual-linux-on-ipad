@@ -5,11 +5,18 @@
 
 #import "VLDevice.h"
 
-/// PL011 串口的最小实现：只做输出（客户机内核日志），输入恒为空。
-/// Linux 用 console=ttyAMA0 就能把启动日志写到这里，方便在 App 里直接看到。
+@class VLInterruptController;
+
+/// PL011 串口的最小实现：输出走数据寄存器，接收侧有一个小 FIFO，
+/// 键盘打字时由 App 主动塞进去，安装器（d-i）从 /dev/ttyAMA0 读。
 @interface VLPL011Serial : NSObject <VLDevice>
 
-- (instancetype)initWithBaseAddress:(uint64_t)baseAddress;
+- (instancetype)initWithBaseAddress:(uint64_t)baseAddress
+					interruptNumber:(uint32_t)interruptNumber
+			  interruptController:(VLInterruptController *)interruptController;
+
+/// 把一段文字压进接收 FIFO，并按 IMSC 里的 RXIM 拉起中断。
+- (void)injectText:(NSString *)text;
 
 @property (nonatomic, readonly) uint64_t baseAddress;
 @property (nonatomic, readonly) uint32_t regionSize;

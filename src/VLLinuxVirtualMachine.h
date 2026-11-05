@@ -57,4 +57,8 @@ typedef NS_ENUM(NSInteger, VLVirtualMachineState) {
 /// 送一个 Linux evdev 按键码（KEY_A = 30 这一套），按下和抬起各调用一次。
 - (void)sendKeycode:(uint16_t)keycode pressed:(BOOL)pressed;
 
+/// 往串口（ttyAMA0）送一段文字。安装器的 stdin 是串口控制台，
+/// 它不走 evdev，键盘必须从 PL011 的接收寄存器进去才能打字。
+- (void)sendText:(NSString *)text;
+
 @end
