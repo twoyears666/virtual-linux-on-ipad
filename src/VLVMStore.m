@@ -6,9 +6,12 @@
 #import "VLStartupLog.h"
 #import "VLStorageManager.h"
 
-/// 配置清单固定放在默认存储位置的根目录，和磁盘镜像分开，
+/// 配置清单固定放在各个存储位置的根目录，和磁盘镜像分开，
 /// 卸载重装、换签名都不会丢。
 static NSString *const VLVMStoreManifestName = @"machines.plist";
+/// 旧版默认位置是「Documents/VirtualMachines」，新版换到 /var/mobile/Media 后
+/// 必须继续把老清单读回来，否则用户会以为更新完虚拟机全没了。
+static NSString *const VLVMStoreLegacyFolderName = @"VirtualMachines";
 
 @interface VLVMStore ()
 
@@ -38,6 +41,7 @@ static NSString *const VLVMStoreManifestName = @"machines.plist";
 
 #pragma mark - 持久化
 
+/// 写入用的清单路径：当前默认位置的根目录。
 - (NSString *)manifestPath {
 	NSString *root = VLStorageManager.sharedManager.defaultLocation.path;
 	if (root.length == 0) {
@@ -46,27 +50,88 @@ static NSString *const VLVMStoreManifestName = @"machines.plist";
 	return [root stringByAppendingPathComponent:VLVMStoreManifestName];
 }
 
-- (void)loadMachines {
-	NSString *path = [self manifestPath];
-	if (path.length == 0) {
-		return;
-	}
-	NSArray *records = [NSArray arrayWithContentsOfFile:path];
-	if (![records isKindOfClass:NSArray.class]) {
-		return;
+/// 读取时把所有可能放清单的地方都走一遍：默认位置、每个登记过的外接目录、
+/// 以及旧版写在 App 沙盒里的 Documents/VirtualMachines。只读默认位置的话，
+/// 换存储位置或升级后清单搬家，列表就空了。
+- (NSArray<NSString *> *)manifestPathsForLoading {
+	NSMutableArray<NSString *> *paths = [NSMutableArray array];
+
+	NSString *defaultPath = [self manifestPath];
+	if (defaultPath.length > 0) {
+		[paths addObject:defaultPath];
 	}
 
-	for (NSDictionary *record in records) {
-		if (![record isKindOfClass:NSDictionary.class]) {
+	for (VLStorageLocation *location in VLStorageManager.sharedManager.locations) {
+		if (location.path.length == 0) {
 			continue;
 		}
-		VLVMConfiguration *configuration = [self configurationFromRecord:record];
-		if (configuration != nil) {
-			[self.mutableMachines addObject:configuration];
+		NSString *path = [location.path stringByAppendingPathComponent:VLVMStoreManifestName];
+		if (![paths containsObject:path]) {
+			[paths addObject:path];
 		}
 	}
+
+	NSString *documentsRoot =
+		[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+	if (documentsRoot.length > 0) {
+		NSString *legacyPath = [[documentsRoot stringByAppendingPathComponent:VLVMStoreLegacyFolderName]
+			stringByAppendingPathComponent:VLVMStoreManifestName];
+		if (![paths containsObject:legacyPath]) {
+			[paths addObject:legacyPath];
+		}
+	}
+
+	return paths;
+}
+
+- (void)loadMachines {
+	// 同一个虚拟机可能同时出现在两份清单里（旧位置一份、新位置一份），
+	// 按存放目录去重，避免列表里出现两份同名虚拟机。
+	NSMutableSet<NSString *> *seen = [NSMutableSet set];
+	NSMutableArray<NSString *> *loadedPaths = [NSMutableArray array];
+
+	for (NSString *path in [self manifestPathsForLoading]) {
+		NSArray *records = [NSArray arrayWithContentsOfFile:path];
+		if (![records isKindOfClass:NSArray.class] || records.count == 0) {
+			continue;
+		}
+
+		NSUInteger added = 0;
+		for (NSDictionary *record in records) {
+			if (![record isKindOfClass:NSDictionary.class]) {
+				continue;
+			}
+			VLVMConfiguration *configuration = [self configurationFromRecord:record];
+			if (configuration == nil) {
+				continue;
+			}
+			NSString *key = configuration.rootPath.length > 0
+				? configuration.rootPath
+				: [NSString stringWithFormat:@"%@|%@", configuration.name, configuration.kernelPath];
+			if ([seen containsObject:key]) {
+				continue;
+			}
+			[seen addObject:key];
+			[self.mutableMachines addObject:configuration];
+			added++;
+		}
+		if (added > 0) {
+			[loadedPaths addObject:path];
+		}
+	}
+
 	if (self.mutableMachines.count > 0) {
-		[VLStartupLog log:@"已载入 %lu 台虚拟机配置", (unsigned long)self.mutableMachines.count];
+		[VLStartupLog log:@"已载入 %lu 台虚拟机配置（来自 %lu 份清单）",
+		 (unsigned long)self.mutableMachines.count, (unsigned long)loadedPaths.count];
+	}
+
+	// 清单是从别处读回来的（旧版 Documents、外接盘），当前默认位置还没有清单：
+	// 立刻补写一份，下次启动只读默认位置也不会丢。
+	NSString *defaultPath = [self manifestPath];
+	if (loadedPaths.count > 0 && defaultPath.length > 0 &&
+		![NSFileManager.defaultManager fileExistsAtPath:defaultPath]) {
+		[self saveMachines];
+		[VLStartupLog log:@"已把虚拟机清单合并写入默认位置：%@", defaultPath];
 	}
 }
 
