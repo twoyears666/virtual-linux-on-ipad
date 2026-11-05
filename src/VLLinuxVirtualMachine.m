@@ -129,6 +129,85 @@ static NSString *VLCPURestName(uint32_t reason) {
 	}
 }
 
+static uint32_t VLDeviceTreeBE32(const uint8_t *bytes, NSUInteger offset) {
+	uint32_t value = 0;
+	memcpy(&value, bytes + offset, sizeof(value));
+	return __builtin_bswap32(value);
+}
+
+/// 诊断用：把刚生成好的 FDT 按层级打出来。设备树是手写的，串口一直
+/// -EPROBE_DEFER 时，第一件要确认的事就是「这段字节里到底有没有 clock-uart
+/// 节点、serial 的 clocks 指向几号 phandle」——不看一眼就只能猜内核为什么 defer。
+static NSString *VLDescribeDeviceTree(NSData *blob) {
+	if (blob.length < 56) {
+		return @"设备树过短";
+	}
+	const uint8_t *bytes = blob.bytes;
+	uint32_t structureOffset = VLDeviceTreeBE32(bytes, 8);
+	uint32_t stringsOffset = VLDeviceTreeBE32(bytes, 12);
+	if (structureOffset >= blob.length || stringsOffset >= blob.length) {
+		return @"设备树偏移非法";
+	}
+	NSMutableString *text = [NSMutableString string];
+	NSUInteger cursor = structureOffset;
+	NSUInteger depth = 0;
+	uint32_t token = 0;
+	while (cursor + 4 <= blob.length) {
+		token = VLDeviceTreeBE32(bytes, cursor);
+		cursor += 4;
+		if (token == 1) { // BEGIN_NODE
+			const char *name = (const char *)(bytes + cursor);
+			NSUInteger length = strlen(name);
+			NSString *node = length > 0 ? [NSString stringWithUTF8String:name] : @"(根)";
+			cursor += length + 1;
+			cursor = (cursor + 3) & ~(NSUInteger)3;
+			[text appendFormat:@"\n%@%@[", depth == 0 ? @"" : @"  ",
+			 depth == 0 ? @"/" : node];
+			depth++;
+		} else if (token == 2) { // END_NODE
+			[text appendString:@"]"];
+			depth = depth > 0 ? depth - 1 : 0;
+		} else if (token == 3) { // PROP
+			if (cursor + 8 > blob.length) {
+				break;
+			}
+			uint32_t length = VLDeviceTreeBE32(bytes, cursor);
+			uint32_t nameOffset = VLDeviceTreeBE32(bytes, cursor + 4);
+			cursor += 8;
+			NSString *name = @"?";
+			if (stringsOffset + nameOffset < blob.length) {
+				name = [NSString stringWithUTF8String:(const char *)(bytes + stringsOffset + nameOffset)] ?: @"?";
+			}
+			if ([name isEqualToString:@"phandle"] || [name isEqualToString:@"clocks"]) {
+				if (length >= 4 && cursor + 4 <= blob.length) {
+					[text appendFormat:@"%@=%u ", name, VLDeviceTreeBE32(bytes, cursor)];
+				} else {
+					[text appendFormat:@"%@ ", name];
+				}
+			} else if (![name isEqualToString:@"compatible"] &&
+					   ![name isEqualToString:@"reg"] &&
+					   ![name isEqualToString:@"interrupts"] &&
+					   ![name isEqualToString:@"clock-frequency"] &&
+					   ![name isEqualToString:@"#clock-cells"] &&
+					   ![name isEqualToString:@"#address-cells"] &&
+					   ![name isEqualToString:@"#size-cells"]) {
+				[text appendFormat:@"%@ ", name];
+			}
+			cursor += length;
+			cursor = (cursor + 3) & ~(NSUInteger)3;
+		} else if (token == 4) { // NOP
+			continue;
+		} else {
+			break; // FDT_END 或损坏
+		}
+		if (text.length > 2400) {
+			[text appendString:@"…"];
+			break;
+		}
+	}
+	return text;
+}
+
 @implementation VLLinuxVirtualMachine {
 	VLVMConfiguration *_configuration;
 
@@ -917,6 +996,9 @@ static NSString *VLCPURestName(uint32_t reason) {
 	[VLStartupLog log:@"设备树已写入 0x%llx（%lu 字节），内核 0x%llx（%ld 字节）",
 	 (unsigned long long)deviceTreeAddress, (unsigned long)deviceTree.length,
 	 (unsigned long long)kernelAddress, (long)kernelSize];
+	// 串口一直 defer 时，先确认这段字节里到底有没有 clock-uart、clocks 指向几号
+	// phandle；不看一眼就只能猜内核为什么 probe 不到时钟。
+	[VLStartupLog log:@"设备树结构：%@", VLDescribeDeviceTree(deviceTree)];
 
 	[self setupDevicesWithSystemDisk:hasBlockDisk isoDisc:hasISODisc];
 

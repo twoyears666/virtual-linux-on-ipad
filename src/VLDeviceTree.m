@@ -193,6 +193,7 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 	[self propertyNamed:@"compatible" string:@"fixed-clock"];
 	[self propertyNamed:@"#clock-cells" cells:@[ @0 ]];
 	[self propertyNamed:@"clock-frequency" cells:@[ @24000000 ]];
+	[self propertyNamed:@"clock-output-names" string:@"uartclk"];
 	[self propertyNamed:@"phandle" cells:@[ @(VLFDTPHandleUARTClock) ]];
 	[self endNode];
 
@@ -207,7 +208,11 @@ static void VLAppendBE64(NSMutableData *data, uint64_t value) {
 				   ]];
 	[self propertyNamed:@"interrupts" cells:@[ @0, @1, @4 ]];
 	[self propertyNamed:@"clocks" cells:@[ @(VLFDTPHandleUARTClock) ]];
+	[self propertyNamed:@"clock-names" string:@"apb_pclk"];
 	[self propertyNamed:@"clock-frequency" cells:@[ @24000000 ]];
+	// PrimeCell ID 直接写死，不依赖 amba 总线去读 0xFE0–0xFEC：
+	// 少一次 ioremap + 读硬件，也避免读到的值不对时驱动根本不匹配。
+	[self propertyNamed:@"arm,primecell-periphid" cells:@[ @0x00141011 ]];
 	[self endNode];
 
 	// virtio-gpu：SPI 2
