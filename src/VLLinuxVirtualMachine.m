@@ -17,6 +17,7 @@
 #import "VLGuestMemory.h"
 #import "VLHostCapabilities.h"
 #import "VLHypervisor.h"
+#import "VLISOInstaller.h"
 #import "VLInterruptController.h"
 #import "VLNetStack.h"
 #import "VLPL011Serial.h"
@@ -886,8 +887,10 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 		}
 		return NO;
 	}
+	// 还在用 ISO 抽出来的安装内核，说明系统盘里没装成；这一轮要跑安装器。
+	BOOL bootsFromInstallerKernel = diskKernel.length == 0;
 	[VLStartupLog log:@"启动来源：%@（内核 %ld 字节）",
-		diskKernel.length > 0 ? @"系统盘里已装好的系统" : @"ISO 安装内核", (long)kernelSize];
+		bootsFromInstallerKernel ? @"ISO 安装内核" : @"系统盘里已装好的系统", (long)kernelSize];
 	// 内核可能有十几 MB，装进客户机内存后立刻放掉。
 	diskKernel = nil;
 
@@ -930,6 +933,30 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 
 	// 从系统盘启动时用安装器写下的那份命令行（里面有真实的 root=），
 	// 从 ISO 安装内核启动时才需要接上自动安装参数。
+	// 早期导入的 ISO、或者自动应答文件跟着存储位置搬了家，preseed 会找不到；
+	// 这里按机器目录补写一份，否则安装器每次都停在手动的语言选择页。
+	if (bootsFromInstallerKernel && bootVolume.commandLine.length == 0) {
+		NSString *preseedPath = _configuration.preseedPath;
+		if (preseedPath.length == 0 ||
+			![NSFileManager.defaultManager fileExistsAtPath:preseedPath]) {
+			preseedPath = [[_configuration.rootPath stringByAppendingPathComponent:@"autoinstall"]
+				stringByAppendingPathComponent:@"preseed.cfg"];
+			[NSFileManager.defaultManager createDirectoryAtPath:preseedPath.stringByDeletingLastPathComponent
+									withIntermediateDirectories:YES
+												 attributes:nil
+													  error:NULL];
+			NSError *preseedError = nil;
+			if ([[VLISOInstaller preseedContents] writeToFile:preseedPath
+													atomically:YES
+													  encoding:NSUTF8StringEncoding
+														 error:&preseedError]) {
+				_configuration.preseedPath = preseedPath;
+				[VLStartupLog log:@"自动应答缺失，已补写到 %@", preseedPath];
+			} else {
+				[VLStartupLog log:@"自动应答补写失败：%@", preseedError.localizedDescription];
+			}
+		}
+	}
 	BOOL hasPreseed = _configuration.preseedPath.length > 0 &&
 		[NSFileManager.defaultManager fileExistsAtPath:_configuration.preseedPath];
 	NSMutableString *bootArguments = [NSMutableString stringWithString:

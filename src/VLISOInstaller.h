@@ -24,6 +24,10 @@
 /// 目前只覆盖 Debian 系；其它发行版只做识别，不做自动应答。
 @interface VLISOInstaller : NSObject
 
+/// Debian 系的自动应答文本。ISO 是早期导入、或者自动应答文件丢了时，
+/// 启动阶段可以直接拿它补写一份，不必重新解析整个 ISO。
++ (NSString *)preseedContents;
+
 /// machineDirectory 是这台虚拟机的根目录，产物写到它的 boot/ 与 autoinstall/ 下。
 /// 失败返回 nil，error 说明原因（例如不是 ISO9660、找不到 install 目录）。
 + (VLISOInstallResult *)prepareISOAtPath:(NSString *)isoPath

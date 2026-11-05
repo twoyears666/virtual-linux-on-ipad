@@ -294,6 +294,12 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 	// modern v2 的队列描述：QueueReady + 三段地址（描述符 / 驱动 / 设备）。
 	if (offset == VLVirtioRegisterQueueReady) {
 		_queues[_queueSelect].ready = (value & 1) != 0;
+		// 现代 virtio-mmio 驱动以 QueueNumMax 为准，不一定会写 QueueNum：
+		// 0.2.3 日志里四个设备挂上时都是「队列深度 0」，块设备的通知会被
+		// processQueueAtIndex 开头的 num==0 判断直接丢掉。这里按最大值兜底。
+		if (_queues[_queueSelect].ready && _queues[_queueSelect].num == 0) {
+			_queues[_queueSelect].num = [self queueNumMax];
+		}
 		_queues[_queueSelect].lastAvailable = 0;
 		return;
 	}
