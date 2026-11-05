@@ -140,6 +140,8 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 	uint32_t _status;
 	uint32_t _interruptStatus;
 	VLVirtioQueueState _queues[VLVirtioMaximumQueues];
+	/// 诊断用：前几次队列配置打一行寄存器快照，确认驱动到底写了哪些值。
+	uint32_t _queueTraceCount;
 }
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress
@@ -301,6 +303,17 @@ static void VLWriteLE32(uint8_t *bytes, uint32_t value) {
 			_queues[_queueSelect].num = [self queueNumMax];
 		}
 		_queues[_queueSelect].lastAvailable = 0;
+		// 诊断：队列到底配没配好，看一次寄存器快照就够了。
+		if (_queueTraceCount < 8) {
+			VLVirtioQueueState *state = &_queues[_queueSelect];
+			[VLStartupLog log:@"virtio 设备 %u 队列 %u：sel=%u num=%u ready=%d desc=0x%llx driver=0x%llx device=0x%llx",
+				(unsigned)[self virtioDeviceID], (unsigned)_queueSelect, (unsigned)_queueSelect,
+				(unsigned)state->num, state->ready ? 1 : 0,
+				(unsigned long long)state->descAddress,
+				(unsigned long long)state->driverAddress,
+				(unsigned long long)state->deviceAddress];
+			_queueTraceCount++;
+		}
 		return;
 	}
 	if (offset == VLVirtioRegisterQueueDescLow) {
