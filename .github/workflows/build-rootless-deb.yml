@@ -74,7 +74,9 @@ jobs:
           set -euo pipefail
           deb="$(ls packages/*.deb | head -1)"
           mkdir -p /tmp/vm-ref /tmp/vl-root
-          curl -fsSL -o /tmp/vm-ref/vm.deb "$VM_REF_DEB_URL"
+          # GitHub Releases 偶发 504，重试几次别让整轮白跑。
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
+            -o /tmp/vm-ref/vm.deb "$VM_REF_DEB_URL"
           ( cd /tmp/vm-ref && ar x vm.deb && mkdir -p payload && tar -xf data.tar.xz -C payload )
           framework="/tmp/vm-ref/payload/var/root/VirtualMac/payload/Frameworks/Hypervisor.framework"
           test -f "$framework/Hypervisor"
