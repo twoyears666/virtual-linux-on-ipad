@@ -13,8 +13,10 @@ static const uint32_t VLPL011InterruptMaskRegister = 0x038;
 static const uint32_t VLPL011RawInterruptStatus = 0x03C;
 static const uint32_t VLPL011MaskedInterruptStatus = 0x040;
 static const uint32_t VLPL011InterruptClearRegister = 0x044;
-/// TX FIFO 空（0x80）| RX FIFO 空（0x10）。
-static const uint32_t VLPL011FlagsIdle = 0x90;
+/// FR 里的 TX FIFO 空位（0x80）与 RX FIFO 空位（0x10）。
+static const uint32_t VLPL011FlagTransmitEmpty = 0x80;
+static const uint32_t VLPL011FlagReceiveEmpty = 0x10;
+static const uint32_t VLPL011FlagsIdle = VLPL011FlagTransmitEmpty | VLPL011FlagReceiveEmpty;
 /// RXIM：接收 FIFO 有数据时触发中断。
 static const uint32_t VLPL011InterruptReceive = 0x10;
 /// PrimeCell 标识寄存器区：0xFE0–0xFFC 共 8 个字节。
@@ -126,7 +128,7 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 		@synchronized (self) {
 			empty = _receiveCount == 0;
 		}
-		return 0x80 | (empty ? 0x10 : 0);
+		return empty ? VLPL011FlagsIdle : VLPL011FlagTransmitEmpty;
 	}
 	if (offset == VLPL011InterruptMaskRegister) {
 		@synchronized (self) {
