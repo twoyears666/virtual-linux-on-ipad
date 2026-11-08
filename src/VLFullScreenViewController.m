@@ -3,7 +3,7 @@
 
 #import "VLFullScreenViewController.h"
 
-#import "VLKeyboardInput.h"
+#import "VLKeyInputView.h"
 #import "VLLinuxVirtualMachine.h"
 #import "VLTerminalEmulator.h"
 #import "VLTerminalView.h"
@@ -11,7 +11,7 @@
 @interface VLFullScreenViewController ()
 
 @property (nonatomic, strong) VLLinuxVirtualMachine *machine;
-@property (nonatomic, strong) VLKeyboardInput *keyboardInput;
+@property (nonatomic, strong) VLKeyInputView *keyInputView;
 @property (nonatomic, strong) VLDisplayView *displayView;
 /// 客户机串口控制台：80x25 字符网格，安装器和 shell 的界面都画在这里。
 @property (nonatomic, strong) VLTerminalView *terminalView;
@@ -22,7 +22,6 @@
 /// 页面还没加载完就收到状态时先存下来，viewDidLoad 再补上。
 @property (nonatomic, copy) NSString *pendingStatus;
 @property (nonatomic, strong) UIButton *exitButton;
-@property (nonatomic, strong) UIButton *keyboardButton;
 
 @end
 
@@ -39,22 +38,24 @@
 - (void)viewDidLoad {
 	[super viewDidLoad];
 	self.view.backgroundColor = UIColor.blackColor;
-	// 真正的独立整屏页面：不是叠在详情页上的浮层。键盘输入框由本页自己持有，
-	// 不需要详情页留在窗口里，所以可以放心用 FullScreen。
+	// 真正的独立整屏页面：不是叠在详情页上的浮层，所以可以放心用 FullScreen。
 	self.modalPresentationStyle = UIModalPresentationFullScreen;
-
-	self.keyboardInput = [[VLKeyboardInput alloc] initWithMachine:self.machine];
-	[self.keyboardInput attachToView:self.view];
 
 	[self buildDisplay];
 	[self buildTerminal];
 	[self buildStatusHUD];
 	[self buildExitButton];
-	[self buildKeyboardButton];
+	[self buildKeyInput];
 
 	if (self.pendingStatus.length > 0) {
 		self.statusLabel.text = self.pendingStatus;
 	}
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+	[super viewDidAppear:animated];
+	// 硬件键盘事件只发给第一响应者；页面一出现就抢过来，不用先点一下。
+	[self.keyInputView focus];
 }
 
 - (BOOL)prefersStatusBarHidden {
@@ -136,7 +137,8 @@
 		[terminal.topAnchor constraintEqualToAnchor:safe.topAnchor constant:24.0],
 		[terminal.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12.0],
 		[terminal.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12.0],
-		[terminal.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-56.0],
+		// 底部空出 48 点给单键栏，终端不能被它压住。
+		[terminal.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-48.0],
 	]];
 }
 
@@ -201,23 +203,20 @@
 	]];
 }
 
-- (void)buildKeyboardButton {
-	UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-	button.translatesAutoresizingMaskIntoConstraints = NO;
-	[button setTitle:@"键盘" forState:UIControlStateNormal];
-	button.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-	[button setTitleColor:UIColor.labelColor forState:UIControlStateNormal];
-	button.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.85];
-	button.layer.cornerRadius = 8.0;
-	[button addTarget:self action:@selector(keyboardTapped) forControlEvents:UIControlEventTouchUpInside];
-	self.keyboardButton = button;
-	[self.view addSubview:button];
+/// 底部一条固定的单键栏（Esc/Tab/方向/回车/退格），同时它也负责接外接键盘。
+/// 不再有「键盘」按钮和系统软键盘：安装器读的是串口 tty，软键盘那套管道既多余又容易失灵。
+- (void)buildKeyInput {
+	VLKeyInputView *keys = [[VLKeyInputView alloc] initWithMachine:self.machine];
+	keys.translatesAutoresizingMaskIntoConstraints = NO;
+	self.keyInputView = keys;
+	[self.view addSubview:keys];
 
+	UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
 	[NSLayoutConstraint activateConstraints:@[
-		[button.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-12.0],
-		[button.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-12.0],
-		[button.widthAnchor constraintEqualToConstant:64.0],
-		[button.heightAnchor constraintEqualToConstant:32.0],
+		[keys.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+		[keys.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+		[keys.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+		[keys.heightAnchor constraintEqualToConstant:44.0],
 	]];
 }
 
@@ -265,10 +264,6 @@
 		self.dismissHandler();
 	}
 	[self dismissViewControllerAnimated:NO completion:nil];
-}
-
-- (void)keyboardTapped {
-	[self.keyboardInput show];
 }
 
 @end

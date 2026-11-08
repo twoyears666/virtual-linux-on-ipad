@@ -6,6 +6,7 @@
 #import <string.h>
 
 #import "VLInterruptController.h"
+#import "VLStartupLog.h"
 
 static const uint32_t VLPL011DataRegister = 0x000;
 static const uint32_t VLPL011FlagRegister = 0x018;
@@ -57,6 +58,10 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	/// 既不会把一个转义序列拆散太久，也不会为每个字符派发一次。
 	NSMutableData *_pendingOutput;
 	CFAbsoluteTime _lastOutputFlush;
+	/// 诊断：注入了几次、客户机读走了多少字节。安装器「按了没反应」时，
+	/// 看这两组数就知道是宿主没送进去，还是客户机根本没读。
+	NSUInteger _injectedChunkCount;
+	NSUInteger _guestReadCount;
 }
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress
@@ -92,6 +97,11 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 		}
 		_rawInterruptStatus |= VLPL011InterruptReceive;
 	}
+	if (_injectedChunkCount < 5) {
+		_injectedChunkCount++;
+		[VLStartupLog log:@"串口注入 %lu 字节（FIFO %lu/64，IMSC=0x%x）",
+		 (unsigned long)length, (unsigned long)_receiveCount, _interruptMask];
+	}
 	[self updateInterruptLine];
 }
 
@@ -126,6 +136,11 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 		// 读空了就把中断线拉低，否则电平会一直挂着。
 		if (emptied) {
 			[self updateInterruptLine];
+		}
+		// 只有第一次读要留证：说明客户机确实把串口输入读走了。
+		if (_guestReadCount < 1 && character != 0) {
+			_guestReadCount++;
+			[VLStartupLog log:@"客户机已读取串口输入（首字节 0x%02x）", character];
 		}
 		return character;
 	}
