@@ -18,6 +18,10 @@
 /// 把一段文字压进接收 FIFO，并按 IMSC 里的 RXIM 拉起中断。
 - (void)injectText:(NSString *)text;
 
+/// 原始字节回调（含 ANSI 控制序列，不做按行切分）。终端渲染靠它。
+/// 在 vCPU 线程上调用，回调里要自己切到合适的队列。
+@property (nonatomic, copy) void (^outputHandler)(NSData *chunk);
+
 @property (nonatomic, readonly) uint64_t baseAddress;
 @property (nonatomic, readonly) uint32_t regionSize;
 

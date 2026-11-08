@@ -22,6 +22,7 @@
 #import "VLPL011Serial.h"
 #import "VLPVPanicDevice.h"
 #import "VLStartupLog.h"
+#import "VLTerminalEmulator.h"
 #import "VLVMConfiguration.h"
 #import "VLVirtioBlock.h"
 #import "VLVirtioConsole.h"
@@ -224,6 +225,9 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	VLVirtioNet *_net;
 	VLVirtioConsole *_console;
 	VLPVPanicDevice *_pvPanic;
+	/// 串口控制台的字符网格，以及它专用的解析队列（vCPU 线程不能在上面解析）。
+	VLTerminalEmulator *_terminal;
+	dispatch_queue_t _terminalQueue;
 	VLNetStack *_network;
 	VLVirtioBlock *_iso;
 
@@ -1046,9 +1050,29 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	};
 	[_deviceBus addDevice:_interruptController];
 
+	// 终端网格：安装器和 shell 的界面都以 ANSI 序列画在串口上。
+	_terminal = [[VLTerminalEmulator alloc] init];
+	_terminalQueue = dispatch_queue_create("com.twoyears666.virtuallinux.terminal",
+										   DISPATCH_QUEUE_SERIAL);
+
 	_serial = [[VLPL011Serial alloc] initWithBaseAddress:VLUARTBase
 										  interruptNumber:VLUARTInterrupt
 										interruptController:_interruptController];
+	_serial.outputHandler = ^(NSData *chunk) {
+		typeof(self) strongSelf = weakSelf;
+		if (strongSelf == nil) {
+			return;
+		}
+		VLTerminalEmulator *terminal = strongSelf->_terminal;
+		dispatch_queue_t queue = strongSelf->_terminalQueue;
+		if (terminal == nil || queue == NULL) {
+			return;
+		}
+		// 解析放在自己的串行队列上，vCPU 线程不能等。
+		dispatch_async(queue, ^{
+			[terminal feed:chunk];
+		});
+	};
 	_serial.textHandler = ^(NSString *line) {
 		typeof(self) strongSelf = weakSelf;
 		if (strongSelf == nil) {

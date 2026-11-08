@@ -5,14 +5,16 @@
 
 #import "VLKeyboardInput.h"
 #import "VLLinuxVirtualMachine.h"
+#import "VLTerminalEmulator.h"
+#import "VLTerminalView.h"
 
 @interface VLFullScreenViewController ()
 
 @property (nonatomic, strong) VLLinuxVirtualMachine *machine;
 @property (nonatomic, strong) VLKeyboardInput *keyboardInput;
 @property (nonatomic, strong) VLDisplayView *displayView;
-@property (nonatomic, strong) UITextView *consoleView;
-@property (nonatomic, strong) NSMutableArray<NSString *> *consoleLines;
+/// 客户机串口控制台：80x25 字符网格，安装器和 shell 的界面都画在这里。
+@property (nonatomic, strong) VLTerminalView *terminalView;
 
 @property (nonatomic, strong) UIView *statusHUD;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -41,12 +43,11 @@
 	// 不需要详情页留在窗口里，所以可以放心用 FullScreen。
 	self.modalPresentationStyle = UIModalPresentationFullScreen;
 
-	self.consoleLines = [NSMutableArray array];
 	self.keyboardInput = [[VLKeyboardInput alloc] initWithMachine:self.machine];
 	[self.keyboardInput attachToView:self.view];
 
 	[self buildDisplay];
-	[self buildConsole];
+	[self buildTerminal];
 	[self buildStatusHUD];
 	[self buildExitButton];
 	[self buildKeyboardButton];
@@ -120,30 +121,22 @@
 	]];
 }
 
-/// 没有画面时这一页显示客户机串口输出：内核启动日志，而不是一行状态字。
-- (void)buildConsole {
-	UITextView *console = [[UITextView alloc] init];
-	console.translatesAutoresizingMaskIntoConstraints = NO;
-	console.backgroundColor = UIColor.clearColor;
-	console.editable = NO;
-	console.textColor = [UIColor colorWithWhite:0.88 alpha:1.0];
-	console.font = [UIFont monospacedSystemFontOfSize:12.0 weight:UIFontWeightRegular];
-	console.textContainerInset = UIEdgeInsetsMake(8.0, 8.0, 8.0, 8.0);
-	console.alwaysBounceVertical = YES;
-	self.consoleView = console;
-	[self.view addSubview:console];
-
-	// 页面创建到真正显示之间可能已经有串口输出了，先补上。
-	if (self.consoleLines.count > 0) {
-		console.text = [self.consoleLines componentsJoinedByString:@"\n"];
-	}
+/// 没有 GPU 画面时这一页显示客户机串口控制台。
+/// 安装器（d-i）的界面就是 80x25 的 ANSI 画面，必须按字符网格渲染；
+/// 当成普通文本贴在 UITextView 里只会看到一堆转义序列。
+- (void)buildTerminal {
+	VLTerminalView *terminal = [[VLTerminalView alloc] init];
+	terminal.translatesAutoresizingMaskIntoConstraints = NO;
+	terminal.emulator = self.machine.terminal;
+	self.terminalView = terminal;
+	[self.view addSubview:terminal];
 
 	UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
 	[NSLayoutConstraint activateConstraints:@[
-		[console.topAnchor constraintEqualToAnchor:safe.topAnchor constant:64.0],
-		[console.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20.0],
-		[console.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20.0],
-		[console.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-64.0],
+		[terminal.topAnchor constraintEqualToAnchor:safe.topAnchor constant:24.0],
+		[terminal.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12.0],
+		[terminal.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12.0],
+		[terminal.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-56.0],
 	]];
 }
 
@@ -245,47 +238,24 @@
 	[self.displayView updateWithWidth:width height:height frame:data];
 	[self.spinner stopAnimating];
 	self.statusHUD.hidden = YES;
-	self.consoleView.hidden = YES;
+	// GPU 有画面就把终端让出去；没有画面时终端才是唯一能看的东西。
+	self.terminalView.hidden = YES;
 }
 
 - (void)clearFrame {
 	[self.displayView clearFrame];
-	self.consoleView.hidden = NO;
+	self.terminalView.hidden = NO;
 	self.statusHUD.hidden = NO;
 	[self.spinner startAnimating];
 }
 
+/// 串口文本不再按行贴到 UITextView：字符网格由终端自己维护，
+/// 这里只负责在还没画面时保证终端可见。
 - (void)appendConsoleLine:(NSString *)line {
-	NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
-	if (trimmed.length == 0) {
+	if (line.length > 0 && self.displayView.hasFrame) {
 		return;
 	}
-
-	// 页面还没显示出来时也要把日志攒住，等 buildConsole 再补上。
-	if (self.consoleLines == nil) {
-		self.consoleLines = [NSMutableArray array];
-	}
-
-	// 用户自己翻上去看日志时不要把他拽回底部。
-	CGFloat contentHeight = self.consoleView.contentSize.height;
-	CGFloat visibleBottom = self.consoleView.contentOffset.y + CGRectGetHeight(self.consoleView.bounds);
-	BOOL followTail = contentHeight <= 0.0 || visibleBottom >= contentHeight - 40.0;
-
-	[self.consoleLines addObject:trimmed];
-	const NSUInteger maximumLines = 400;
-	if (self.consoleLines.count > maximumLines) {
-		[self.consoleLines removeObjectsInRange:NSMakeRange(0, self.consoleLines.count - maximumLines)];
-	}
-	if (self.consoleView == nil) {
-		return;
-	}
-	self.consoleView.text = [self.consoleLines componentsJoinedByString:@"\n"];
-
-	if (followTail) {
-		CGPoint bottom = CGPointMake(0.0, MAX(0.0, self.consoleView.contentSize.height -
-												   CGRectGetHeight(self.consoleView.bounds)));
-		[self.consoleView setContentOffset:bottom animated:NO];
-	}
+	self.terminalView.hidden = NO;
 }
 
 #pragma mark - 动作

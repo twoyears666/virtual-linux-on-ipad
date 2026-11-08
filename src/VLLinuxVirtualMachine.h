@@ -3,6 +3,7 @@
 
 #import <Foundation/Foundation.h>
 
+@class VLTerminalEmulator;
 @class VLVMConfiguration;
 
 typedef NS_ENUM(NSInteger, VLVirtualMachineState) {
@@ -42,6 +43,10 @@ typedef NS_ENUM(NSInteger, VLVirtualMachineState) {
 
 @property (nonatomic, readonly) VLVirtualMachineState state;
 @property (nonatomic, readonly, copy) NSString *statusMessage;
+
+/// 客户机串口控制台的字符网格。安装器把界面以 ANSI 转义序列画在 ttyAMA0 上，
+/// 这里就是那些序列解析后的 80x25 结果，交给 VLTerminalView 显示。
+@property (nonatomic, readonly) VLTerminalEmulator *terminal;
 
 /// 启动。会先做能力校验，失败时立即返回 NO 并写 error。
 - (BOOL)startWithError:(NSError **)error;

@@ -53,6 +53,10 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	uint8_t _receiveBuffer[64];
 	NSUInteger _receiveHead;
 	NSUInteger _receiveCount;
+	/// 还没交给终端渲染的原始字节。攒够一批、遇到换行或超过 50 ms 就冲刷，
+	/// 既不会把一个转义序列拆散太久，也不会为每个字符派发一次。
+	NSMutableData *_pendingOutput;
+	CFAbsoluteTime _lastOutputFlush;
 }
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress
@@ -65,6 +69,8 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 		_lineBuffer = [NSMutableString string];
 		_interruptNumber = interruptNumber;
 		_interruptController = interruptController;
+		_pendingOutput = [NSMutableData data];
+		_lastOutputFlush = CFAbsoluteTimeGetCurrent();
 	}
 	return self;
 }
@@ -173,6 +179,20 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	// 只取最低字节，其余当控制寄存器写入忽略。
 	uint8_t character = (uint8_t)(value & 0xFF);
 	_writtenCharacterCount++;
+
+	// 原始字节另走一路给终端渲染：转义序列必须原样保留。
+	if (self.outputHandler != nil) {
+		[_pendingOutput appendBytes:&character length:1];
+		CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+		if (character == '\n' || _pendingOutput.length >= 512 ||
+			now - _lastOutputFlush >= 0.05) {
+			NSData *chunk = [_pendingOutput copy];
+			[_pendingOutput setLength:0];
+			_lastOutputFlush = now;
+			self.outputHandler(chunk);
+		}
+	}
+
 	if (character == '\r') {
 		return;
 	}
