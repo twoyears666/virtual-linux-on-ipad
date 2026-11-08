@@ -17,7 +17,8 @@ jobs:
   # === 编译打包 —— 分支产出未签名 IPA，供 TrollStore / AltStore 重签安装 ===
   build:
     name: 编译打包
-    runs-on: macos-14
+    # 固定用 Intel 镜像：macos-14 现在会被解析到 arm64 配置，公共仓库没有权限，任务会被秒取消。
+    runs-on: macos-13
     env:
       THEOS: ${{ github.workspace }}/.theos-src
     steps:
