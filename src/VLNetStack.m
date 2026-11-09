@@ -39,6 +39,8 @@
 #define VLNetTCPFlagACK 0x10
 
 static const uint8_t VLNetGuestMAC[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+/// 宿主侧虚拟网卡的源 MAC，只用于下行帧的以太头。
+static const uint8_t VLNetHostMAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
 static uint16_t VLReadBE16(const uint8_t *bytes) {
 	return (uint16_t)(((uint16_t)bytes[0] << 8) | (uint16_t)bytes[1]);
@@ -1186,8 +1188,10 @@ typedef NS_ENUM(NSInteger, VLNetTCPState) {
 				  etherType:(uint16_t)etherType {
 	NSMutableData *frame = [NSMutableData dataWithCapacity:VLNetEthernetHeaderLength + length];
 	uint8_t header[VLNetEthernetHeaderLength];
-	memcpy(header, VLNetGuestMAC, 6);
-	memcpy(header + 6, _macAddress.bytes, 6);
+	// 目的地必须是客户机网卡实际通告的 MAC：用户改过 MAC 时，
+	// 写死默认值会让客户机把下行帧全部丢掉（DHCP 就永远拿不到地址）。
+	memcpy(header, _macAddress.bytes, 6);
+	memcpy(header + 6, VLNetHostMAC, 6);
 	VLWriteBE16(header + 12, etherType);
 	[frame appendBytes:header length:sizeof(header)];
 	[frame appendBytes:payload length:length];

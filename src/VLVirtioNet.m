@@ -13,8 +13,10 @@
 #define VLVirtioNetReceiveQueue 0
 #define VLVirtioNetTransmitQueue 1
 
-// legacy v1 的 virtio_net_hdr 是 10 字节，不协商 MRG_RXBUF。
-#define VLVirtioNetHeaderLength 10
+// 本设备是 modern（virtio-mmio version 2），协商了 VIRTIO_F_VERSION_1，
+// virtio_net_hdr 必须按 12 字节算（10 字节头 + num_buffers）。
+// 之前按 legacy 的 10 字节收，客户机的包会整体错位 2 字节，DHCP 全被丢掉。
+#define VLVirtioNetHeaderLength 12
 #define VLVirtioNetQueueNumMax 64
 
 // VIRTIO_NET_F_MAC：设备提供 MAC，客户机不用自己随机生成。
@@ -156,6 +158,14 @@ typedef struct {
 	}
 
 	if (frame.length > 0) {
+		static NSInteger frameLogCount = 0;
+		if (frameLogCount < 5) {
+			frameLogCount++;
+			uint16_t etherType = frame.length >= 14
+				? (uint16_t)((frame.bytes[12] << 8) | frame.bytes[13]) : 0;
+			[VLStartupLog log:@"virtio-net 收到客户机帧：%lu 字节 以太类型 0x%04x",
+			 (unsigned long)frame.length, etherType];
+		}
 		[self.network handleGuestFrame:frame];
 	}
 	[self completeChainWithHead:head length:(uint32_t)totalLength queueIndex:VLVirtioNetTransmitQueue];
@@ -185,6 +195,9 @@ typedef struct {
 				continue;
 			}
 			memset(destination, 0, VLVirtioNetHeaderLength);
+			// 没协商 MRG_RXBUF 时 num_buffers 要写 1，内核按合并缓冲的默认值校验。
+			destination[10] = 1;
+			destination[11] = 0;
 			memcpy(destination + VLVirtioNetHeaderLength, frame.bytes, frame.length);
 			[self completeChainWithHead:pending.head
 								 length:(uint32_t)required

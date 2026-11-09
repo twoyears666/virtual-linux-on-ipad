@@ -156,6 +156,10 @@ static uint16_t VLKeycodeForControlCharacter(unichar character) {
 /// 只有用户点了键盘按钮才创建并唤起它：平时连第一响应者都不占，
 /// 硬件键盘事件始终落在本视图上。
 @property (nonatomic, strong) UITextField *softKeyboardField;
+/// 方向键/退格这类键自己接管长按重复：系统的重复事件会在松手后还残留一个，
+/// 表现为「按住上再按下，会先多上走一格」。
+@property (nonatomic, strong) NSTimer *keyRepeatTimer;
+@property (nonatomic, assign) uint16_t repeatingKeycode;
 
 @end
 
@@ -176,6 +180,15 @@ static uint16_t VLKeycodeForControlCharacter(unichar character) {
 
 - (BOOL)canBecomeFirstResponder {
 	return YES;
+}
+
+- (BOOL)resignFirstResponder {
+	[self stopKeyRepeat];
+	return [super resignFirstResponder];
+}
+
+- (void)dealloc {
+	[_keyRepeatTimer invalidate];
 }
 
 - (void)focus {
@@ -315,6 +328,63 @@ static uint16_t VLKeycodeForControlCharacter(unichar character) {
 	[self sendKeycode:(uint16_t)sender.tag];
 }
 
+#pragma mark - 长按重复
+
+/// 只有这些键需要长按连发：方向、翻页、退格、删除。
+static BOOL VLKeycodeRepeats(uint16_t keycode) {
+	switch (keycode) {
+		case 14:   // Backspace
+		case 111:  // Delete
+		case 103:  // Up
+		case 105:  // Left
+		case 106:  // Right
+		case 108:  // Down
+		case 102:  // Home
+		case 107:  // End
+		case 104:  // PageUp
+		case 109:  // PageDown
+			return YES;
+	}
+	return NO;
+}
+
+- (void)startKeyRepeatForKeycode:(uint16_t)keycode {
+	[self stopKeyRepeat];
+	if (!VLKeycodeRepeats(keycode)) {
+		return;
+	}
+	self.repeatingKeycode = keycode;
+	__weak typeof(self) weakSelf = self;
+	// 先等 0.45 秒再开始连发，之后每 0.09 秒一次，接近系统键盘手感。
+	NSTimer *timer = [NSTimer timerWithTimeInterval:0.45 repeats:NO block:^(NSTimer *fired) {
+		[weakSelf beginRepeatingKeycode];
+	}];
+	[NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+	self.keyRepeatTimer = timer;
+}
+
+- (void)beginRepeatingKeycode {
+	uint16_t keycode = self.repeatingKeycode;
+	if (keycode == 0) {
+		return;
+	}
+	__weak typeof(self) weakSelf = self;
+	NSTimer *timer = [NSTimer timerWithTimeInterval:0.09 repeats:YES block:^(NSTimer *fired) {
+		typeof(self) strongSelf = weakSelf;
+		if (strongSelf != nil) {
+			[strongSelf sendKeycode:keycode];
+		}
+	}];
+	[NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+	self.keyRepeatTimer = timer;
+}
+
+- (void)stopKeyRepeat {
+	[self.keyRepeatTimer invalidate];
+	self.keyRepeatTimer = nil;
+	self.repeatingKeycode = 0;
+}
+
 #pragma mark - 硬件键盘
 
 - (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
@@ -329,10 +399,16 @@ static uint16_t VLKeycodeForControlCharacter(unichar character) {
 		// "UIKeyInputUpArrow" 这类常量字符串，当成普通文本打进串口就是一堆洋字。
 		uint16_t keycode = VLKeycodeForHIDUsage((uint16_t)key.keyCode);
 		if (keycode != 0) {
+			if (self.pressedKeys[@(key.keyCode)] != nil) {
+				// 系统自动重复：丢掉，改由下面的定时器按固定节奏补发。
+				continue;
+			}
 			self.pressedKeys[@(key.keyCode)] = @(keycode);
 			[self sendKeycode:keycode];
+			[self startKeyRepeatForKeycode:keycode];
 			continue;
 		}
+		[self stopKeyRepeat];
 		NSString *characters = key.characters;
 		if (characters.length == 0) {
 			continue;
@@ -371,6 +447,9 @@ static uint16_t VLKeycodeForControlCharacter(unichar character) {
 		consumed = YES;
 		[self.pressedKeys removeObjectForKey:@(key.keyCode)];
 		[self.machine sendKeycode:(uint16_t)keycode.unsignedShortValue pressed:NO];
+		if (self.repeatingKeycode == (uint16_t)keycode.unsignedShortValue) {
+			[self stopKeyRepeat];
+		}
 	}
 	if (!consumed) {
 		[super pressesEnded:presses withEvent:event];
