@@ -161,8 +161,9 @@ typedef struct {
 		static NSInteger frameLogCount = 0;
 		if (frameLogCount < 5) {
 			frameLogCount++;
+			const uint8_t *bytes = frame.bytes;
 			uint16_t etherType = frame.length >= 14
-				? (uint16_t)((frame.bytes[12] << 8) | frame.bytes[13]) : 0;
+				? (uint16_t)((bytes[12] << 8) | bytes[13]) : 0;
 			[VLStartupLog log:@"virtio-net 收到客户机帧：%lu 字节 以太类型 0x%04x",
 			 (unsigned long)frame.length, etherType];
 		}
