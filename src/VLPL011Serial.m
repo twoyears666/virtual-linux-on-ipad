@@ -23,8 +23,9 @@ static const uint32_t VLPL011InterruptReceive = 0x10;
 /// PrimeCell 标识寄存器区：0xFE0–0xFFC 共 8 个字节。
 static const uint32_t VLPL011IdentifierStart = 0xFE0;
 static const uint32_t VLPL011IdentifierEnd = 0xFFC;
-/// 接收 FIFO 深度。安装器只会一次塞几个字符，64 足够。
-static const NSUInteger VLPL011ReceiveCapacity = 64;
+/// 接收 FIFO 深度。安装器只会一次塞几个字符，但方向键这种是 3 字节序列，
+/// 客户机偶尔读得慢一点，留 512 免得丢字节（丢字节看起来就是「按键不稳定」）。
+static const NSUInteger VLPL011ReceiveCapacity = 512;
 /// PL011 的 PrimeCell ID（PeripheralID0–3、PrimeCellID0–3）。
 /// amba 总线在 probe 时会读这一段来核对外设型号，读回全 0 就判 -ENODEV，
 /// ttyAMA0 根本不会注册——内核随后打印 `unable to open an initial console`，
@@ -51,7 +52,7 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	uint32_t _interruptNumber;
 	__weak VLInterruptController *_interruptController;
 	/// 接收 FIFO 是一个环形缓冲。读在 vCPU 线程、写在主线程，所以访问都要加锁。
-	uint8_t _receiveBuffer[64];
+	uint8_t _receiveBuffer[512];
 	NSUInteger _receiveHead;
 	NSUInteger _receiveCount;
 	/// 还没交给终端渲染的原始字节。攒够一批、遇到换行或超过 50 ms 就冲刷，
@@ -99,8 +100,9 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	}
 	if (_injectedChunkCount < 5) {
 		_injectedChunkCount++;
-		[VLStartupLog log:@"串口注入 %lu 字节（FIFO %lu/64，IMSC=0x%x）",
-		 (unsigned long)length, (unsigned long)_receiveCount, _interruptMask];
+		[VLStartupLog log:@"串口注入 %lu 字节（FIFO %lu/%lu，IMSC=0x%x）",
+		 (unsigned long)length, (unsigned long)_receiveCount,
+		 (unsigned long)VLPL011ReceiveCapacity, _interruptMask];
 	}
 	[self updateInterruptLine];
 }

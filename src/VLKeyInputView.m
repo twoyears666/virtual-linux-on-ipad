@@ -136,11 +136,14 @@ static NSString *VLTextForSpecialKeycode(uint16_t keycode) {
 
 #pragma mark -
 
-@interface VLKeyInputView ()
+@interface VLKeyInputView () <UITextFieldDelegate>
 
 @property (nonatomic, strong) VLLinuxVirtualMachine *machine;
 /// 已按下、还没抬起的键（HID 用法号 → evdev 按键码），用于释放配对。
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *pressedKeys;
+/// 只有用户点了键盘按钮才创建并唤起它：平时连第一响应者都不占，
+/// 硬件键盘事件始终落在本视图上。
+@property (nonatomic, strong) UITextField *softKeyboardField;
 
 @end
 
@@ -164,6 +167,65 @@ static NSString *VLTextForSpecialKeycode(uint16_t keycode) {
 }
 
 - (void)focus {
+	if (self.softKeyboardField.isFirstResponder) {
+		return;
+	}
+	[self becomeFirstResponder];
+}
+
+- (void)showSoftKeyboard {
+	if (self.softKeyboardField == nil) {
+		UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(0.0, 0.0, 1.0, 1.0)];
+		field.delegate = self;
+		field.autocorrectionType = UITextAutocorrectionTypeNo;
+		field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+		field.spellCheckingType = UITextSpellCheckingTypeNo;
+		field.smartQuotesType = UITextSmartQuotesTypeNo;
+		field.smartDashesType = UITextSmartDashesTypeNo;
+		field.keyboardAppearance = UIKeyboardAppearanceDark;
+		field.textColor = UIColor.clearColor;
+		field.tintColor = UIColor.clearColor;
+		// 常驻一个空格：内容为空时退格不会触发 delegate，删不掉字符。
+		field.text = @" ";
+		// 放在可视区域外，但必须在视图树里才能成为第一响应者。
+		[self addSubview:field];
+		self.softKeyboardField = field;
+	}
+	[self.softKeyboardField becomeFirstResponder];
+}
+
+- (void)hideSoftKeyboard {
+	[self.softKeyboardField resignFirstResponder];
+	[self becomeFirstResponder];
+}
+
+#pragma mark - UITextFieldDelegate
+
+- (BOOL)textField:(UITextField *)textField
+	shouldChangeCharactersInRange:(NSRange)range
+				replacementString:(NSString *)string {
+	if (string.length == 0) {
+		// 退格：串口侧发 DEL，evdev 侧发 Backspace。
+		[self.machine sendText:@"\x7f"];
+		[self.machine sendKeycode:14 pressed:YES];
+		[self.machine sendKeycode:14 pressed:NO];
+	} else {
+		for (NSUInteger index = 0; index < string.length; index++) {
+			[self sendCharacter:[string characterAtIndex:index]];
+		}
+	}
+	// 文本只借它来触发回调，内容不留，光标也回到末尾。
+	textField.text = @" ";
+	return NO;
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+	[self sendKeycode:28];
+	return NO;
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+	// 软键盘收起后把第一响应者还给本视图，硬件键盘继续可用。
 	[self becomeFirstResponder];
 }
 

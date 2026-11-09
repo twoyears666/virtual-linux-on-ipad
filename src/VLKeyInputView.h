@@ -16,4 +16,10 @@
 /// 抢回第一响应者。切回本页、点完按钮之后都要调一次，否则硬件键盘事件收不到。
 - (void)focus;
 
+/// 唤起系统软键盘（控制条上的键盘按钮用）。没接外接键盘时才需要。
+- (void)showSoftKeyboard;
+
+/// 收起系统软键盘。
+- (void)hideSoftKeyboard;
+
 @end

@@ -3,10 +3,16 @@
 
 #import "VLFullScreenViewController.h"
 
+#import <GameController/GameController.h>
+
+#import "VLControlBar.h"
 #import "VLKeyInputView.h"
 #import "VLLinuxVirtualMachine.h"
 #import "VLTerminalEmulator.h"
 #import "VLTerminalView.h"
+
+static NSString *const VLControlBarCornerKey = @"VLControlBarCorner";
+static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 
 @interface VLFullScreenViewController ()
 
@@ -21,7 +27,7 @@
 @property (nonatomic, strong) UILabel *statusLabel;
 /// 页面还没加载完就收到状态时先存下来，viewDidLoad 再补上。
 @property (nonatomic, copy) NSString *pendingStatus;
-@property (nonatomic, strong) UIButton *exitButton;
+@property (nonatomic, strong) VLControlBar *controlBar;
 
 @end
 
@@ -38,24 +44,53 @@
 - (void)viewDidLoad {
 	[super viewDidLoad];
 	self.view.backgroundColor = UIColor.blackColor;
-	// 真正的独立整屏页面：不是叠在详情页上的浮层，所以可以放心用 FullScreen。
-	self.modalPresentationStyle = UIModalPresentationFullScreen;
 
 	[self buildDisplay];
 	[self buildTerminal];
 	[self buildStatusHUD];
-	[self buildExitButton];
 	[self buildKeyInput];
+	// 控制条最后加，保证它压在底部按键栏上面。
+	[self buildControlBar];
+
+	NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+	[center addObserver:self selector:@selector(hardwareKeyboardChanged)
+				   name:GCKeyboardDidConnectNotification object:nil];
+	[center addObserver:self selector:@selector(hardwareKeyboardChanged)
+				   name:GCKeyboardDidDisconnectNotification object:nil];
 
 	if (self.pendingStatus.length > 0) {
 		self.statusLabel.text = self.pendingStatus;
 	}
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+	[super viewWillAppear:animated];
+	// 这是一个独立页面，不是弹窗：进来就把设置页的导航栏收掉，退出时再还原。
+	self.navigationController.navigationBarHidden = YES;
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+	[super viewWillDisappear:animated];
+	self.navigationController.navigationBarHidden = NO;
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+	[super viewDidDisappear:animated];
+	// 侧滑返回不会走 dismissHandler，这里补上，否则详情页再也不会自动切回画面。
+	if (self.isMovingFromParentViewController && self.dismissHandler != nil) {
+		self.dismissHandler();
+	}
+}
+
+- (void)dealloc {
+	[NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
 - (void)viewDidAppear:(BOOL)animated {
 	[super viewDidAppear:animated];
 	// 硬件键盘事件只发给第一响应者；页面一出现就抢过来，不用先点一下。
 	[self.keyInputView focus];
+	[self hardwareKeyboardChanged];
 }
 
 - (BOOL)prefersStatusBarHidden {
@@ -183,28 +218,99 @@
 	]];
 }
 
-- (void)buildExitButton {
-	UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-	button.translatesAutoresizingMaskIntoConstraints = NO;
-	[button setTitle:@"退出" forState:UIControlStateNormal];
-	button.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-	[button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-	button.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.7];
-	button.layer.cornerRadius = 8.0;
-	[button addTarget:self action:@selector(exitTapped) forControlEvents:UIControlEventTouchUpInside];
-	self.exitButton = button;
-	[self.view addSubview:button];
+- (void)buildControlBar {
+	__weak typeof(self) weakSelf = self;
+	VLControlBar *bar = [[VLControlBar alloc] initWithKeyboardHandler:^{
+		[weakSelf.keyInputView showSoftKeyboard];
+	}];
+	NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+	// 角位置和透明度都记在设置里，下次进来还是上次那套。
+	if ([defaults objectForKey:VLControlBarCornerKey] != nil) {
+		bar.corner = (VLControlBarCorner)[defaults integerForKey:VLControlBarCornerKey];
+	}
+	bar.barOpacity = [defaults objectForKey:VLControlBarOpacityKey] != nil
+		? [defaults doubleForKey:VLControlBarOpacityKey]
+		: 0.85;
+	self.controlBar = bar;
+	[self.view addSubview:bar];
+	bar.menu = [self controlMenu];
+}
 
-	[NSLayoutConstraint activateConstraints:@[
-		[button.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-12.0],
-		[button.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12.0],
-		[button.widthAnchor constraintEqualToConstant:64.0],
-		[button.heightAnchor constraintEqualToConstant:34.0],
-	]];
+/// 「更多」菜单：回到主页、软键盘、控制方式（按钮位置与透明度）。
+- (UIMenu *)controlMenu {
+	__weak typeof(self) weakSelf = self;
+	UIAction *home = [UIAction actionWithTitle:@"回到主页"
+										image:[UIImage systemImageNamed:@"house"]
+								   identifier:nil
+									  handler:^(__kindof UIAction *action) {
+		[weakSelf exitTapped];
+	}];
+	UIAction *keyboard = [UIAction actionWithTitle:@"软键盘"
+											image:[UIImage systemImageNamed:@"keyboard"]
+									   identifier:nil
+										  handler:^(__kindof UIAction *action) {
+		[weakSelf.keyInputView showSoftKeyboard];
+	}];
+
+	NSArray<NSString *> *cornerTitles = @[ @"左上", @"右上", @"左下", @"右下" ];
+	NSMutableArray<UIAction *> *cornerActions = [NSMutableArray array];
+	for (NSInteger index = 0; index < (NSInteger)cornerTitles.count; index++) {
+		UIAction *action = [UIAction actionWithTitle:cornerTitles[index]
+											  image:nil
+										 identifier:nil
+											handler:^(__kindof UIAction *selected) {
+			[weakSelf changeCorner:(VLControlBarCorner)index];
+		}];
+		action.state = weakSelf.controlBar.corner == (VLControlBarCorner)index
+			? UIMenuElementStateOn : UIMenuElementStateOff;
+		[cornerActions addObject:action];
+	}
+	UIMenu *cornerMenu = [UIMenu menuWithTitle:@"按钮位置"
+										 image:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"]
+									  children:cornerActions];
+
+	NSArray<NSNumber *> *opacities = @[ @0.3, @0.5, @0.7, @0.9 ];
+	NSMutableArray<UIAction *> *opacityActions = [NSMutableArray array];
+	for (NSNumber *value in opacities) {
+		UIAction *action = [UIAction actionWithTitle:
+							   [NSString stringWithFormat:@"%d%%", (int)(value.doubleValue * 100.0)]
+											  image:nil
+										 identifier:nil
+											handler:^(__kindof UIAction *selected) {
+			[weakSelf changeOpacity:value.doubleValue];
+		}];
+		action.state = ABS(weakSelf.controlBar.barOpacity - value.doubleValue) < 0.01
+			? UIMenuElementStateOn : UIMenuElementStateOff;
+		[opacityActions addObject:action];
+	}
+	UIMenu *opacityMenu = [UIMenu menuWithTitle:@"按钮透明度"
+										  image:[UIImage systemImageNamed:@"circle.lefthalf.filled"]
+									   children:opacityActions];
+	UIMenu *settings = [UIMenu menuWithTitle:@"控制方式"
+									   image:[UIImage systemImageNamed:@"slider.horizontal.3"]
+									children:@[ cornerMenu, opacityMenu ]];
+	return [UIMenu menuWithTitle:@"" children:@[ home, keyboard, settings ]];
+}
+
+- (void)changeCorner:(VLControlBarCorner)corner {
+	self.controlBar.corner = corner;
+	[NSUserDefaults.standardUserDefaults setInteger:corner forKey:VLControlBarCornerKey];
+	self.controlBar.menu = [self controlMenu];
+}
+
+- (void)changeOpacity:(CGFloat)opacity {
+	self.controlBar.barOpacity = opacity;
+	[NSUserDefaults.standardUserDefaults setDouble:opacity forKey:VLControlBarOpacityKey];
+	self.controlBar.menu = [self controlMenu];
+}
+
+/// 接上外接键盘就收起屏幕键盘按钮，只剩「更多」一个圆；拔掉再长回来。
+- (void)hardwareKeyboardChanged {
+	self.controlBar.keyboardButtonVisible = (GCKeyboard.coalesced == nil);
 }
 
 /// 底部一条固定的单键栏（Esc/Tab/方向/回车/退格），同时它也负责接外接键盘。
-/// 不再有「键盘」按钮和系统软键盘：安装器读的是串口 tty，软键盘那套管道既多余又容易失灵。
+/// 系统软键盘只在控制条上点了键盘按钮时才唤起，不再常驻。
 - (void)buildKeyInput {
 	VLKeyInputView *keys = [[VLKeyInputView alloc] initWithMachine:self.machine];
 	keys.translatesAutoresizingMaskIntoConstraints = NO;
@@ -263,7 +369,13 @@
 	if (self.dismissHandler != nil) {
 		self.dismissHandler();
 	}
-	[self dismissViewControllerAnimated:NO completion:nil];
+	// 本页是导航栈里的子页面，退出去就是 pop；没有导航栈时再退回弹窗式关闭。
+	UINavigationController *navigation = self.navigationController;
+	if (navigation != nil && navigation.viewControllers.count > 1) {
+		[navigation popViewControllerAnimated:YES];
+	} else {
+		[self dismissViewControllerAnimated:YES completion:nil];
+	}
 }
 
 @end

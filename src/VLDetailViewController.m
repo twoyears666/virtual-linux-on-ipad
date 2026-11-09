@@ -863,17 +863,18 @@
 	[self presentFullScreenIfPossible];
 }
 
-/// 启动后直接切到客户机的独立全屏页面，和 Virtual Mac 一样不再停在设置页。
+/// 启动后切到客户机的页面。这一页是导航栈里的子页面，不是弹窗：
+/// 用户从「更多 → 回到主页」退回来，设置页还在原位。
 /// 不做转场动画：这里是「换页」，不是弹一张卡片上来。
 - (void)presentFullScreenIfPossible {
-	if (self.virtualMachine == nil || self.presentedViewController != nil) {
+	if (self.virtualMachine == nil || self.fullScreenController != nil || self.presentedViewController != nil) {
 		return;
 	}
 	if (self.fullScreenSuppressedByUser) {
 		return;
 	}
-	// 页面还没真正上屏（例如刚选中虚拟机、窗口还没挂上）时立刻 present 会被系统丢掉，
-	// 结果就是只留下一条状态、看不到全屏页。等一个 runloop 再试。
+	// 页面还没真正上屏（例如刚选中虚拟机、窗口还没挂上）时立刻 push 会被系统丢掉，
+	// 结果就是只留下一条状态、看不到客户机页面。等一个 runloop 再试。
 	if (self.view.window == nil) {
 		__weak typeof(self) weakSelf = self;
 		dispatch_async(dispatch_get_main_queue(), ^{
@@ -885,14 +886,19 @@
 	VLFullScreenViewController *controller =
 		[[VLFullScreenViewController alloc] initWithMachine:self.virtualMachine];
 	__weak typeof(self) weakSelf = self;
-	// 用户按「退出」：记住这个选择，之后状态再变化也别把页面盖回来。
+	// 用户回到主页：记住这个选择，之后状态再变化也别把页面盖回来。
 	controller.dismissHandler = ^{
 		weakSelf.fullScreenController = nil;
 		weakSelf.fullScreenSuppressedByUser = YES;
 	};
 	[controller updateStatus:[self machineStatusText]];
 	self.fullScreenController = controller;
-	[self presentViewController:controller animated:NO completion:nil];
+	UINavigationController *navigation = self.navigationController;
+	if (navigation != nil) {
+		[navigation pushViewController:controller animated:NO];
+	} else {
+		[self presentViewController:controller animated:NO completion:nil];
+	}
 }
 
 - (void)presentMessage:(NSString *)title detail:(NSString *)detail {
