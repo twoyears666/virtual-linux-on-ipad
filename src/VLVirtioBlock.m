@@ -18,6 +18,7 @@
 #define VLBlockRequestIn 0
 #define VLBlockRequestOut 1
 #define VLBlockRequestFlush 4
+#define VLBlockRequestGetId 8
 
 #define VLBlockStatusOkay 0
 #define VLBlockStatusIOError 1
@@ -97,7 +98,11 @@ static uint64_t VLBlockReadLE64(const uint8_t *bytes) {
 }
 
 - (uint32_t)virtioDeviceFeatures {
-	return 1u << 9; // VIRTIO_BLK_F_FLUSH
+	uint32_t features = 1u << 9; // VIRTIO_BLK_F_FLUSH
+	if (_readOnly) {
+		features |= 1u << 5; // VIRTIO_BLK_F_RO
+	}
+	return features;
 }
 
 - (uint32_t)queueNumMax {
@@ -161,6 +166,8 @@ static uint64_t VLBlockReadLE64(const uint8_t *bytes) {
 		}
 	} else if (type == VLBlockRequestIn || type == VLBlockRequestOut) {
 		result = [self transferChain:chain type:type offset:sector * VLBlockSectorSize];
+	} else if (type == VLBlockRequestGetId) {
+		result = [self writeIdentifierToChain:chain];
 	} else {
 		result = VLBlockStatusUnsupported;
 	}
@@ -171,11 +178,43 @@ static uint64_t VLBlockReadLE64(const uint8_t *bytes) {
 		static NSInteger failureCount = 0;
 		if (failureCount < 8) {
 			failureCount++;
-			[VLStartupLog log:@"virtio-blk 请求失败：类型 %u 扇区 %llu 结果 %u",
-			 type, (unsigned long long)sector, result];
+			[VLStartupLog log:@"virtio-blk 请求失败：%@ 类型 %u 扇区 %llu 结果 %u",
+			 _imagePath.lastPathComponent, type, (unsigned long long)sector, result];
 		}
 	}
 	return 1;
+}
+
+/// VIRTIO_BLK_T_GET_ID：把设备序列号写进可写缓冲区（规范上限 20 字节，含结尾 NUL）。
+/// 安装器的磁盘识别会读它，之前不支持就一直报「请求失败」。
+- (uint8_t)writeIdentifierToChain:(NSArray<VLVirtioBufferDescriptor *> *)chain {
+	NSString *identifier = _imagePath.lastPathComponent.stringByDeletingPathExtension;
+	if (identifier.length == 0) {
+		identifier = @"virtio-blk";
+	}
+	const char *utf8 = identifier.UTF8String;
+	NSUInteger length = strlen(utf8);
+	if (length > 19) {
+		length = 19;
+	}
+	for (NSUInteger index = 1; index + 1 < chain.count; index++) {
+		VLVirtioBufferDescriptor *descriptor = chain[index];
+		if (descriptor.length == 0 || !descriptor.writable) {
+			continue;
+		}
+		uint8_t *pointer = [self.guestMemory hostPointerForGuestAddress:descriptor.address
+																 length:descriptor.length];
+		if (pointer == NULL) {
+			return VLBlockStatusIOError;
+		}
+		NSUInteger copy = length < descriptor.length ? length : descriptor.length;
+		memcpy(pointer, utf8, copy);
+		if (copy < descriptor.length) {
+			pointer[copy] = 0;
+		}
+		return VLBlockStatusOkay;
+	}
+	return VLBlockStatusIOError;
 }
 
 - (uint8_t)transferChain:(NSArray<VLVirtioBufferDescriptor *> *)chain
