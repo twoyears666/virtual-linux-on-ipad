@@ -134,6 +134,18 @@ static NSString *VLTextForSpecialKeycode(uint16_t keycode) {
 	}
 }
 
+/// 控制字符（退格、回车、Tab、Esc）→ evdev 按键码。
+/// 这几种键在 UIKit 里 characters 是 0x08/0x0d 这样的控制字符，不能按普通字符走。
+static uint16_t VLKeycodeForControlCharacter(unichar character) {
+	switch (character) {
+		case 0x08: case 0x7F: return 14;  // Backspace / Delete
+		case 0x0D: case 0x0A: return 28;  // Return
+		case 0x09: return 15;             // Tab
+		case 0x1B: return 1;              // Esc
+	}
+	return 0;
+}
+
 #pragma mark -
 
 @interface VLKeyInputView () <UITextFieldDelegate>
@@ -313,26 +325,32 @@ static NSString *VLTextForSpecialKeycode(uint16_t keycode) {
 			continue;
 		}
 		consumed = YES;
-		NSString *characters = key.characters;
-		if (characters.length > 0) {
-			for (NSUInteger index = 0; index < characters.length; index++) {
-				unichar character = [characters characterAtIndex:index];
-				if (character >= 0x20 || character == '\t') {
-					[self sendCharacter:character];
-				}
-			}
-			continue;
-		}
+		// 先按 HID 用法号查特殊键。不能先看 characters：UIKit 对方向键返回的是
+		// "UIKeyInputUpArrow" 这类常量字符串，当成普通文本打进串口就是一堆洋字。
 		uint16_t keycode = VLKeycodeForHIDUsage((uint16_t)key.keyCode);
-		if (keycode == 0) {
+		if (keycode != 0) {
+			self.pressedKeys[@(key.keyCode)] = @(keycode);
+			[self sendKeycode:keycode];
 			continue;
 		}
-		self.pressedKeys[@(key.keyCode)] = @(keycode);
-		NSString *text = VLTextForSpecialKeycode(keycode);
-		if (text.length > 0) {
-			[self.machine sendText:text];
+		NSString *characters = key.characters;
+		if (characters.length == 0) {
+			continue;
 		}
-		[self.machine sendKeycode:keycode pressed:YES];
+		// 退格、回车这类控制字符也走按键码，否则会被当成不可打印字符丢掉。
+		if (characters.length == 1) {
+			uint16_t control = VLKeycodeForControlCharacter([characters characterAtIndex:0]);
+			if (control != 0) {
+				[self sendKeycode:control];
+				continue;
+			}
+		}
+		for (NSUInteger index = 0; index < characters.length; index++) {
+			unichar character = [characters characterAtIndex:index];
+			if (character >= 0x20 && character != 0x7F) {
+				[self sendCharacter:character];
+			}
+		}
 	}
 	if (!consumed) {
 		[super pressesBegan:presses withEvent:event];

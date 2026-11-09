@@ -114,7 +114,8 @@ static uint64_t VLBlockReadLE64(const uint8_t *bytes) {
 	}
 	for (uint32_t index = 0; index < 4; index++) {
 		bytes[8 + index] = (uint8_t)((VLBlockMaximumTransferSize >> (8 * index)) & 0xFF);
-		bytes[12 + index] = (uint8_t)((VLBlockSectorSize >> (8 * index)) & 0xFF);
+		// virtio_blk_config 里 blk_size 在偏移 20（前面还隔着 geometry），别放错。
+		bytes[20 + index] = (uint8_t)((VLBlockSectorSize >> (8 * index)) & 0xFF);
 	}
 
 	if ((uint64_t)offset + width > sizeof(bytes)) {
@@ -165,6 +166,15 @@ static uint64_t VLBlockReadLE64(const uint8_t *bytes) {
 	}
 
 	*statusByte = result;
+	if (result != VLBlockStatusOkay) {
+		// 安装器报「读不到磁盘」时，靠这条判断是越界、只读还是宿主读写失败。
+		static NSInteger failureCount = 0;
+		if (failureCount < 8) {
+			failureCount++;
+			[VLStartupLog log:@"virtio-blk 请求失败：类型 %u 扇区 %llu 结果 %u",
+			 type, (unsigned long long)sector, result];
+		}
+	}
 	return 1;
 }
 

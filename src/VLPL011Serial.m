@@ -63,6 +63,9 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	/// 看这两组数就知道是宿主没送进去，还是客户机根本没读。
 	NSUInteger _injectedChunkCount;
 	NSUInteger _guestReadCount;
+	/// FIFO 满时被丢掉的字节数，只报一次，避免刷屏。
+	NSUInteger _droppedByteCount;
+	BOOL _droppedByteReported;
 }
 
 - (instancetype)initWithBaseAddress:(uint64_t)baseAddress
@@ -90,13 +93,19 @@ static uint32_t VLPL011IdentifierRegister(uint32_t offset) {
 	@synchronized (self) {
 		for (NSUInteger index = 0; index < length; index++) {
 			if (_receiveCount >= VLPL011ReceiveCapacity) {
-				break;
+				_droppedByteCount++;
+				continue;
 			}
 			NSUInteger tail = (_receiveHead + _receiveCount) % VLPL011ReceiveCapacity;
 			_receiveBuffer[tail] = (uint8_t)bytes[index];
 			_receiveCount++;
 		}
 		_rawInterruptStatus |= VLPL011InterruptReceive;
+	}
+	if (_droppedByteCount > 0 && !_droppedByteReported) {
+		_droppedByteReported = YES;
+		[VLStartupLog log:@"串口输入丢了 %lu 字节（FIFO 已满 %lu）",
+		 (unsigned long)_droppedByteCount, (unsigned long)VLPL011ReceiveCapacity];
 	}
 	if (_injectedChunkCount < 5) {
 		_injectedChunkCount++;

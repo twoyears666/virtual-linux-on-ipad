@@ -28,6 +28,9 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 /// 页面还没加载完就收到状态时先存下来，viewDidLoad 再补上。
 @property (nonatomic, copy) NSString *pendingStatus;
 @property (nonatomic, strong) VLControlBar *controlBar;
+/// 进来之前的分栏显示模式，退出时还原，别把设置页的侧栏弄丢。
+@property (nonatomic, assign) UISplitViewControllerDisplayMode previousDisplayMode;
+@property (nonatomic, assign) BOOL displayModeOverridden;
 
 @end
 
@@ -67,11 +70,23 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 	[super viewWillAppear:animated];
 	// 这是一个独立页面，不是弹窗：进来就把设置页的导航栏收掉，退出时再还原。
 	self.navigationController.navigationBarHidden = YES;
+	// 客户机画面要占满整屏：把分栏收成单栏，侧栏整块隐藏。
+	UISplitViewController *split = self.splitViewController;
+	if (split != nil && !self.displayModeOverridden) {
+		self.previousDisplayMode = split.preferredDisplayMode;
+		self.displayModeOverridden = YES;
+		split.preferredDisplayMode = UISplitViewControllerDisplayModeSecondaryOnly;
+	}
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
 	[super viewWillDisappear:animated];
 	self.navigationController.navigationBarHidden = NO;
+	UISplitViewController *split = self.splitViewController;
+	if (split != nil && self.displayModeOverridden) {
+		self.displayModeOverridden = NO;
+		split.preferredDisplayMode = self.previousDisplayMode;
+	}
 }
 
 - (void)viewDidDisappear:(BOOL)animated {

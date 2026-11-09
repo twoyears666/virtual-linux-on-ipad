@@ -17,6 +17,46 @@ static const uint8_t VLTerminalDefaultBackground = 0;
 /// 解码失败时写一个替换字符，避免整行错位。
 static const uint32_t VLTerminalReplacementCharacter = 0xFFFD;
 
+/// DEC 特殊图形字符集（ESC ( 0）的 0x5F–0x7E 段。
+/// 安装器的对话框边框、进度条全是这一套，不翻译就只剩 lqqqqqqqu 之类的鬼画符。
+static uint32_t VLTerminalDecGraphic(uint32_t character) {
+	switch (character) {
+		case 0x5F: return 0x00A0; // 不断行空格
+		case 0x60: return 0x25C6; // ◆
+		case 0x61: return 0x2592; // ▒
+		case 0x62: return 0x2409; // ␉
+		case 0x63: return 0x240C; // ␌
+		case 0x64: return 0x240D; // ␍
+		case 0x65: return 0x240A; // ␊
+		case 0x66: return 0x00B0; // °
+		case 0x67: return 0x00B1; // ±
+		case 0x68: return 0x2424; // ␤
+		case 0x69: return 0x240B; // ␋
+		case 0x6A: return 0x2518; // ┘
+		case 0x6B: return 0x2510; // ┐
+		case 0x6C: return 0x250C; // ┌
+		case 0x6D: return 0x2514; // └
+		case 0x6E: return 0x253C; // ┼
+		case 0x6F: return 0x23BA; // ⎺
+		case 0x70: return 0x23BB; // ⎻
+		case 0x71: return 0x2500; // ─
+		case 0x72: return 0x23BC; // ⎼
+		case 0x73: return 0x23BD; // ⎽
+		case 0x74: return 0x251C; // ├
+		case 0x75: return 0x2524; // ┤
+		case 0x76: return 0x2534; // ┴
+		case 0x77: return 0x252C; // ┬
+		case 0x78: return 0x2502; // │
+		case 0x79: return 0x2264; // ≤
+		case 0x7A: return 0x2265; // ≥
+		case 0x7B: return 0x03C0; // π
+		case 0x7C: return 0x2260; // ≠
+		case 0x7D: return 0x00A3; // £
+		case 0x7E: return 0x00B7; // ·
+		default: return character;
+	}
+}
+
 typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 	VLTerminalParserStateGround = 0,
 	VLTerminalParserStateEscape,
@@ -65,6 +105,16 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 	uint8_t _utf8Pending[4];
 	NSUInteger _utf8PendingCount;
 	NSUInteger _utf8ExpectedCount;
+
+	/// 写完最后一个字符后先挂起换行，等下一个字符真的来了再折行。
+	/// 安装器会把 80 列整行写满，立刻折行会多滚一屏、把对话框冲掉。
+	BOOL _wrapPending;
+	/// DEC 特殊图形字符集（ESC ( 0）：安装器的边框全靠它画。
+	BOOL _specialGraphics;
+	uint8_t _charsetDesignator;
+	/// 插入模式（CSI 4h）。
+	BOOL _insertMode;
+	uint32_t _lastCharacter;
 }
 
 - (instancetype)init {
@@ -115,6 +165,11 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 	_csiCurrentParameter = -1;
 	_utf8PendingCount = 0;
 	_utf8ExpectedCount = 0;
+	_wrapPending = NO;
+	_specialGraphics = NO;
+	_charsetDesignator = 0;
+	_insertMode = NO;
+	_lastCharacter = ' ';
 	_generation++;
 }
 
@@ -200,7 +255,11 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 			return;
 
 		case VLTerminalParserStateCharset:
-			// ESC ( X / ESC ) X / ESC # 8 之类：吃掉该字节即结束。
+			// ESC ( X / ESC ) X：X 为 '0' 时切到 DEC 特殊图形字符集，'B'/'A' 之类回到 ASCII。
+			if (_charsetDesignator == '(' || _charsetDesignator == ')') {
+				_specialGraphics = (byte == '0');
+			}
+			_charsetDesignator = 0;
 			_parserState = VLTerminalParserStateGround;
 			return;
 
@@ -298,7 +357,8 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 		case '#':
 		case '%':
 		case ' ':
-			// 字符集/键盘映射选择：后面跟一个字节，一起跳过。
+			// 字符集/键盘映射选择：后面跟一个字节，一起处理。
+			_charsetDesignator = byte;
 			_parserState = VLTerminalParserStateCharset;
 			return;
 		case '7':
@@ -457,6 +517,30 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 		case 'T':
 			[self scrollDown:count];
 			return;
+		case '@':
+			[self insertCharacters:count];
+			return;
+		case 'P':
+			[self deleteCharacters:count];
+			return;
+		case 'X':
+			[self eraseCharacters:count];
+			return;
+		case 'L':
+			[self insertLines:count];
+			return;
+		case 'M':
+			[self deleteLines:count];
+			return;
+		case 'Z':
+			[self setCursorColumn:_cursorColumn - count * 8 row:_cursorRow];
+			return;
+		case 'b':
+			// 重复上一个字符：安装器画横线时用得到。
+			for (NSInteger index = 0; index < count; index++) {
+				[self writeCharacter:_lastCharacter];
+			}
+			return;
 		case 's':
 			[self saveCursor];
 			return;
@@ -484,11 +568,13 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 	if (row > VLTerminalRowCount - 1) {
 		row = VLTerminalRowCount - 1;
 	}
+	_wrapPending = NO;
 	if (column == _cursorColumn && row == _cursorRow) {
 		return;
 	}
 	_cursorColumn = column;
 	_cursorRow = row;
+	_wrapPending = NO;
 	// 光标方块也是画面的一部分，移动同样要让 UI 重画。
 	_generation++;
 }
@@ -515,22 +601,37 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 #pragma mark - 写字符
 
 - (void)writeCharacter:(uint32_t)character {
+	// 上一行写满 80 列时挂起的折行，到这里才真正生效。
+	if (_wrapPending) {
+		_wrapPending = NO;
+		_cursorColumn = 0;
+		[self lineFeed];
+	}
+	uint32_t mapped = (_specialGraphics && character >= 0x5F && character <= 0x7E)
+		? VLTerminalDecGraphic(character)
+		: character;
+	if (_insertMode) {
+		[self insertCharacters:1];
+	}
 	VLTerminalCell *cell = &_cells[_cursorRow * VLTerminalColumnCount + _cursorColumn];
-	cell->character = character;
+	cell->character = mapped;
 	cell->foreground = _foreground;
 	cell->background = _background;
 	cell->attributes = _attributes;
+	_lastCharacter = mapped;
 
-	_cursorColumn++;
-	if (_cursorColumn >= VLTerminalColumnCount) {
-		_cursorColumn = 0;
-		[self lineFeed];
+	if (_cursorColumn < VLTerminalColumnCount - 1) {
+		_cursorColumn++;
+	} else {
+		// 末列先不折行，等下一个字符；否则安装器画满一行就会多滚动一次。
+		_wrapPending = YES;
 	}
 	_generation++;
 }
 
 /// 下移一行；在滚动区底部时整体上滚。
 - (void)lineFeed {
+	_wrapPending = NO;
 	if (_cursorRow == _scrollBottom) {
 		[self scrollUp:1];
 		return;
@@ -662,6 +763,109 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 	_generation++;
 }
 
+/// 把某一行 [start, end) 的格子清成当前底色。
+- (void)blankCellsInRow:(NSInteger)row from:(NSInteger)start to:(NSInteger)end {
+	if (row < 0 || row >= VLTerminalRowCount) {
+		return;
+	}
+	if (start < 0) {
+		start = 0;
+	}
+	if (end > VLTerminalColumnCount) {
+		end = VLTerminalColumnCount;
+	}
+	for (NSInteger column = start; column < end; column++) {
+		VLTerminalCell *cell = &_cells[row * VLTerminalColumnCount + column];
+		cell->character = 0;
+		cell->foreground = _foreground;
+		cell->background = _background;
+		cell->attributes = 0;
+	}
+}
+
+/// CSI X：从光标起擦掉 count 个字符，其余格子不动。
+- (void)eraseCharacters:(NSInteger)count {
+	if (count <= 0) {
+		return;
+	}
+	[self blankCellsInRow:_cursorRow from:_cursorColumn to:_cursorColumn + count];
+	_generation++;
+}
+
+/// CSI P：删掉光标起 count 个字符，右侧整体左移。
+- (void)deleteCharacters:(NSInteger)count {
+	NSInteger room = VLTerminalColumnCount - _cursorColumn;
+	if (count <= 0 || room <= 0) {
+		return;
+	}
+	if (count > room) {
+		count = room;
+	}
+	VLTerminalCell *line = &_cells[_cursorRow * VLTerminalColumnCount];
+	memmove(&line[_cursorColumn], &line[_cursorColumn + count],
+			(size_t)(room - count) * sizeof(VLTerminalCell));
+	[self blankCellsInRow:_cursorRow from:VLTerminalColumnCount - count to:VLTerminalColumnCount];
+	_generation++;
+}
+
+/// CSI @：在光标处插入 count 个空格，右侧整体右移。插入模式也走这里。
+- (void)insertCharacters:(NSInteger)count {
+	NSInteger room = VLTerminalColumnCount - _cursorColumn;
+	if (count <= 0 || room <= 0) {
+		return;
+	}
+	if (count > room) {
+		count = room;
+	}
+	VLTerminalCell *line = &_cells[_cursorRow * VLTerminalColumnCount];
+	memmove(&line[_cursorColumn + count], &line[_cursorColumn],
+			(size_t)(room - count) * sizeof(VLTerminalCell));
+	[self blankCellsInRow:_cursorRow from:_cursorColumn to:_cursorColumn + count];
+	_generation++;
+}
+
+/// CSI L：在滚动区内插入 count 行。
+- (void)insertLines:(NSInteger)count {
+	if (_cursorRow < _scrollTop || _cursorRow > _scrollBottom) {
+		return;
+	}
+	NSInteger height = _scrollBottom - _cursorRow + 1;
+	if (count > height) {
+		count = height;
+	}
+	if (count <= 0) {
+		return;
+	}
+	memmove(&_cells[(_cursorRow + count) * VLTerminalColumnCount],
+			&_cells[_cursorRow * VLTerminalColumnCount],
+			(size_t)((height - count) * VLTerminalColumnCount) * sizeof(VLTerminalCell));
+	for (NSInteger row = _cursorRow; row < _cursorRow + count; row++) {
+		[self fillRow:row];
+	}
+	_generation++;
+}
+
+/// CSI M：在滚动区内删掉 count 行。
+- (void)deleteLines:(NSInteger)count {
+	if (_cursorRow < _scrollTop || _cursorRow > _scrollBottom) {
+		return;
+	}
+	NSInteger height = _scrollBottom - _cursorRow + 1;
+	if (count > height) {
+		count = height;
+	}
+	if (count <= 0) {
+		return;
+	}
+	memmove(&_cells[_cursorRow * VLTerminalColumnCount],
+			&_cells[(_cursorRow + count) * VLTerminalColumnCount],
+			(size_t)((height - count) * VLTerminalColumnCount) * sizeof(VLTerminalCell));
+	for (NSInteger row = _scrollBottom - count + 1; row <= _scrollBottom; row++) {
+		[self fillRow:row];
+	}
+	_generation++;
+}
+
 #pragma mark - SGR 与模式
 
 - (void)applySGR {
@@ -705,7 +909,12 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 
 - (void)applyModes:(BOOL)enable {
 	if (_csiPrefix != '?') {
-		// 非私有模式（插入/换行等）不支持，忽略。
+		// 非私有模式只认插入模式（CSI 4h/4l），安装器重绘整行时会用到。
+		for (NSInteger index = 0; index < _csiParameterCount; index++) {
+			if (_csiParameters[index] == 4) {
+				_insertMode = enable;
+			}
+		}
 		return;
 	}
 	for (NSInteger index = 0; index < _csiParameterCount; index++) {
