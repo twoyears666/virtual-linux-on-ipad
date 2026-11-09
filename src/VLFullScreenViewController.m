@@ -267,6 +267,8 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 	}
 	UIMenu *cornerMenu = [UIMenu menuWithTitle:@"按钮位置"
 										 image:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"]
+									identifier:nil
+									   options:0
 									  children:cornerActions];
 
 	NSArray<NSNumber *> *opacities = @[ @0.3, @0.5, @0.7, @0.9 ];
@@ -285,9 +287,13 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 	}
 	UIMenu *opacityMenu = [UIMenu menuWithTitle:@"按钮透明度"
 										  image:[UIImage systemImageNamed:@"circle.lefthalf.filled"]
+									 identifier:nil
+										options:0
 									   children:opacityActions];
 	UIMenu *settings = [UIMenu menuWithTitle:@"控制方式"
 									   image:[UIImage systemImageNamed:@"slider.horizontal.3"]
+								  identifier:nil
+									 options:0
 									children:@[ cornerMenu, opacityMenu ]];
 	return [UIMenu menuWithTitle:@"" children:@[ home, keyboard, settings ]];
 }
@@ -306,7 +312,7 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 
 /// 接上外接键盘就收起屏幕键盘按钮，只剩「更多」一个圆；拔掉再长回来。
 - (void)hardwareKeyboardChanged {
-	self.controlBar.keyboardButtonVisible = (GCKeyboard.coalesced == nil);
+	self.controlBar.keyboardButtonVisible = ([GCKeyboard coalescedKeyboard] == nil);
 }
 
 /// 底部一条固定的单键栏（Esc/Tab/方向/回车/退格），同时它也负责接外接键盘。
