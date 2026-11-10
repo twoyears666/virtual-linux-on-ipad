@@ -175,6 +175,13 @@ typedef NS_ENUM(uint8_t, VLTerminalParserState) {
 
 #pragma mark - 只读属性
 
+- (void)reset {
+	@synchronized (self) {
+		[self resetState];
+		_generation++;
+	}
+}
+
 - (NSInteger)columns {
 	return VLTerminalColumnCount;
 }

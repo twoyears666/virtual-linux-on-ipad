@@ -32,6 +32,9 @@ static const uint8_t VLTerminalAttributeReverse = 1 << 1;
 /// 喂原始字节（UTF-8 与控制序列都在里面）。
 - (void)feed:(NSData *)data;
 
+/// 清屏并复位解析状态：虚拟机重新启动时用，别让上一次的旧界面留在屏幕上。
+- (void)reset;
+
 /// 取一个单元，越界返回全 0。
 - (VLTerminalCell)cellAtColumn:(NSInteger)column row:(NSInteger)row;
 

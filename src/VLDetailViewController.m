@@ -895,6 +895,21 @@
 	self.fullScreenController = controller;
 	UINavigationController *navigation = self.navigationController;
 	if (navigation != nil) {
+		// 上一次停机时如果留下了旧画面页，先清掉再压新的，
+		// 不然栈里会叠两层画面页，返回时先看到一层黑页。
+		NSMutableArray<UIViewController *> *stack = [navigation.viewControllers mutableCopy];
+		NSMutableArray<UIViewController *> *stale = [NSMutableArray array];
+		for (UIViewController *existing in stack) {
+			if ([existing isKindOfClass:VLFullScreenViewController.class] && existing != self) {
+				[stale addObject:existing];
+			}
+		}
+		if (stale.count > 0) {
+			[stack removeObjectsInArray:stale];
+			[VLStartupLog log:@"全屏页 清理 %lu 个残留旧画面页", (unsigned long)stale.count];
+			[navigation setViewControllers:stack animated:NO];
+		}
+		[VLStartupLog log:@"全屏页 推入导航栈"];
 		[navigation pushViewController:controller animated:NO];
 	} else {
 		[self presentViewController:controller animated:NO completion:nil];
@@ -948,6 +963,20 @@
 - (void)dismissFullScreen {
 	VLFullScreenViewController *controller = self.fullScreenController;
 	self.fullScreenController = nil;
+	// 这一页现在是导航栈里的子页面，presentingViewController 为空，
+	// 只按弹窗处理会永远关不掉，停机后就停在没画面的黑页上。
+	UINavigationController *navigation = controller.navigationController;
+	if (navigation != nil && [navigation.viewControllers containsObject:controller]) {
+		[VLStartupLog log:@"全屏页 退出（导航栈回退）"];
+		// popToViewController 会把栈里压在设置页之上的页面一起去掉，
+		// 以前残留的旧画面页也能一并清掉。
+		if ([navigation.viewControllers containsObject:self]) {
+			[navigation popToViewController:self animated:NO];
+		} else {
+			[navigation popToRootViewControllerAnimated:NO];
+		}
+		return;
+	}
 	if (controller != nil && controller.presentingViewController != nil) {
 		[controller dismissViewControllerAnimated:NO completion:nil];
 	}
@@ -965,7 +994,12 @@
 		});
 	};
 
-	if (controller != nil && controller.presentingViewController != nil) {
+	if (controller != nil && controller.navigationController != nil &&
+		[controller.navigationController.viewControllers containsObject:controller]) {
+		// 子页面也是「关掉页面再弹提示」，否则提示会被压在黑页下面看不见。
+		[self dismissFullScreen];
+		showAlert();
+	} else if (controller != nil && controller.presentingViewController != nil) {
 		[controller dismissViewControllerAnimated:NO completion:showAlert];
 	} else if (controller != nil) {
 		// 全屏还在呈现途中：等它落定再关，否则 dismiss 空转、弹窗也弹不出来。

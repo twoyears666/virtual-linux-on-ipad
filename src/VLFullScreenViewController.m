@@ -8,6 +8,7 @@
 #import "VLControlBar.h"
 #import "VLKeyInputView.h"
 #import "VLLinuxVirtualMachine.h"
+#import "VLStartupLog.h"
 #import "VLTerminalEmulator.h"
 #import "VLTerminalView.h"
 
@@ -31,6 +32,8 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 /// 进来之前的分栏显示模式，退出时还原，别把设置页的侧栏弄丢。
 @property (nonatomic, assign) UISplitViewControllerDisplayMode previousDisplayMode;
 @property (nonatomic, assign) BOOL displayModeOverridden;
+/// 空白帧只在第一次记一条日志，避免刷屏。
+@property (nonatomic, assign) BOOL blankFrameLogged;
 
 @end
 
@@ -360,7 +363,35 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 	[self.spinner startAnimating];
 }
 
+/// 判断一帧是不是「整幅同一个颜色」的空白画面。
+/// virtio-gpu 驱动挂上后会先提交一帧全黑的扫描输出，此时客户机真正的界面还在串口上；
+/// 把这种帧当成画面显示，就会把终端和状态条一起盖掉，屏幕上只剩一片黑。
+static BOOL VLFrameIsBlank(NSData *data, uint32_t width, uint32_t height) {
+	NSUInteger pixelCount = (NSUInteger)width * height;
+	if (data.length < pixelCount * 4 || pixelCount == 0) {
+		return YES;
+	}
+	const uint32_t *pixels = data.bytes;
+	uint32_t first = pixels[0];
+	// 均匀抽样几百个点足够判断：真正的界面不可能处处同色。
+	NSUInteger step = MAX((NSUInteger)1, pixelCount / 512);
+	for (NSUInteger index = 0; index < pixelCount; index += step) {
+		if (pixels[index] != first) {
+			return NO;
+		}
+	}
+	return YES;
+}
+
 - (void)updateFrameWidth:(uint32_t)width height:(uint32_t)height data:(NSData *)data {
+	if (VLFrameIsBlank(data, width, height)) {
+		if (!self.blankFrameLogged) {
+			self.blankFrameLogged = YES;
+			[VLStartupLog log:@"GPU 提交空白画面 %ux%u，继续显示串口控制台", width, height];
+		}
+		return;
+	}
+	self.blankFrameLogged = NO;
 	[self.displayView updateWithWidth:width height:height frame:data];
 	[self.spinner stopAnimating];
 	self.statusHUD.hidden = YES;
@@ -370,8 +401,13 @@ static NSString *const VLControlBarOpacityKey = @"VLControlBarOpacity";
 
 - (void)clearFrame {
 	[self.displayView clearFrame];
+	// 客户端画面没了就把终端请回来，不要留一块黑屏让人以为卡死。
 	self.terminalView.hidden = NO;
 	self.statusHUD.hidden = NO;
+	self.blankFrameLogged = NO;
+	if (self.statusLabel.text.length == 0) {
+		self.statusLabel.text = self.pendingStatus.length > 0 ? self.pendingStatus : @"客户机已停止";
+	}
 	[self.spinner startAnimating];
 }
 

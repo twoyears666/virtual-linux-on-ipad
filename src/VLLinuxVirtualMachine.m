@@ -247,6 +247,11 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	NSUInteger _cpuCount;
 	NSCondition *_startCondition;
 	NSRecursiveLock *_deviceLock;
+	/// 启动轮次。停机后立刻再启动时，上一轮的 vCPU 线程可能还在收尾，
+	/// 它报出来的「已停止」会把刚推上来的画面页又关掉，看起来就是黑屏。
+	uint64_t _startGeneration;
+	/// runVirtualMachine 线程是否还活着，重启前要等它真正退出。
+	BOOL _threadActive;
 
 	/// 每条中断线的「期望电平」（设备侧看到的），以及每个核已经真正下发给 HVF 的电平。
 	/// HVF 的 pending 中断只能由负责跑这个 vCPU 的线程设置（不是跨线程安全的），
@@ -370,6 +375,10 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	}
 
 	_hypervisor = hypervisor;
+	// 上一轮线程没退干净就开新一轮，两个线程会同时 destroy 设备，
+	// 新的一轮刚建好就被拆掉，表现就是启动后一直黑屏。
+	[self waitForPreviousThreadToFinish];
+	_startGeneration++;
 	_stopRequested = NO;
 	_exitCount = 0;
 	_inputServicePending = NO;
@@ -408,6 +417,9 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	_mmioTrapCount = 0;
 	[_startCondition unlock];
 	[self parseDisplayResolution];
+	// 重新启动时必须清掉上一次的控制台画面，否则新页面会先显示旧内容，
+	// 看起来像「没启动起来」。
+	[_terminal reset];
 	[self reportState:VLVirtualMachineStateStarting message:@"创建虚拟硬件…"];
 
 	NSThread *thread = [[NSThread alloc] initWithTarget:self selector:@selector(runVirtualMachine) object:nil];
@@ -416,6 +428,22 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 	[thread start];
 	[self startUsageSampling];
 	return YES;
+}
+
+/// 等上一轮的 runVirtualMachine 线程彻底退出（最多等 3 秒）。
+/// 不这样做的话，旧线程的 teardown 会把新一轮刚建好的串口/GPU 拆掉。
+- (void)waitForPreviousThreadToFinish {
+	[_startCondition lock];
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
+	while (_threadActive && deadline.timeIntervalSinceNow > 0) {
+		[_startCondition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	}
+	BOOL stillActive = _threadActive;
+	_threadActive = NO;
+	[_startCondition unlock];
+	if (stillActive) {
+		[VLStartupLog log:@"上一轮线程 3 秒内没有退出，强制继续启动"];
+	}
 }
 
 /// 每 10 秒量一次自身的 CPU / 内存占用。用 UTILITY 队列上的定时器，少干扰客户机。
@@ -680,12 +708,17 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 #pragma mark - vCPU 线程
 
 - (void)runVirtualMachine {
+	VLReportGeneration = _startGeneration;
+	[_startCondition lock];
+	_threadActive = YES;
+	[_startCondition unlock];
 	@autoreleasepool {
 		NSError *error = nil;
 		if (![self setupEnvironmentWithError:&error]) {
 			[VLStartupLog log:@"虚拟化启动失败：%@", error.localizedDescription];
 			[self reportFailure:error.localizedDescription];
 			[self teardown];
+			[self markThreadFinished];
 			return;
 		}
 
@@ -705,12 +738,23 @@ static NSString *VLDescribeDeviceTree(NSData *blob) {
 		if (_state != VLVirtualMachineStateFailed) {
 			[self reportState:VLVirtualMachineStateStopped message:@"已停止"];
 		}
+		[self markThreadFinished];
 	}
+}
+
+/// 通知主线程「这一轮已经彻底结束」，restart 前会等这个信号。
+- (void)markThreadFinished {
+	[_startCondition lock];
+	_threadActive = NO;
+	[_startCondition broadcast];
+	[_startCondition unlock];
 }
 
 /// 一个 vCPU 的全部一生：建 vCPU → 等开机 → 跑退出循环 → 销毁。必须全在同一个线程里做，
 /// 这是 Hypervisor.framework 的硬性要求。
 - (void)runProcessor:(NSNumber *)indexBox {
+	// 非 0 号核跑在自己线程上，也要带上轮次，报错时才不会被当成新的一轮。
+	VLReportGeneration = _startGeneration;
 	NSUInteger index = indexBox.unsignedIntegerValue;
 	@autoreleasepool {
 		VLSetProcessorIndexForCurrentThread((uint32_t)index);
@@ -1807,15 +1851,28 @@ static uint64_t VLGuestCounterValue(void) {
 						   userInfo:@{ NSLocalizedDescriptionKey : message }];
 }
 
+/// 每个 vCPU 线程记下自己属于第几轮启动，用于丢弃上一轮的迟到回报。
+static __thread uint64_t VLReportGeneration = 0;
+
 - (void)reportState:(VLVirtualMachineState)state message:(NSString *)message {
+	uint64_t generation = VLReportGeneration;
+	if (generation != 0 && generation != _startGeneration) {
+		// 上一轮的线程已经过期：连状态都不能改，否则新一轮会被标成「已停止」。
+		[VLStartupLog log:@"丢弃过期线程的状态回报（状态 %ld）", (long)state];
+		return;
+	}
 	_state = state;
 	_statusMessage = [message copy];
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		typeof(self) strongSelf = weakSelf;
-		if (strongSelf != nil) {
-			[strongSelf.delegate virtualMachine:strongSelf didChangeState:state message:message];
+		if (strongSelf == nil) {
+			return;
 		}
+		if (generation != 0 && generation != strongSelf->_startGeneration) {
+			return;
+		}
+		[strongSelf.delegate virtualMachine:strongSelf didChangeState:state message:message];
 	});
 }
 
